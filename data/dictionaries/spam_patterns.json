@@ -1,0 +1,36 @@
+{
+  "exact_default_phrases": [
+    "chất lượng sản phẩm tuyệt vời",
+    "đóng gói sản phẩm rất đẹp và chắc chắn",
+    "shop phục vụ rất tốt",
+    "thời gian giao hàng rất nhanh",
+    "chất lượng sản phẩm tốt",
+    "chất lượng sản phẩm tạm được",
+    "chất lượng sản phẩm kém",
+    "chưa sử dụng nên chưa biết",
+    "chưa dùng nên chưa biết",
+    "chưa dùng nên chưa đánh giá được",
+    "chưa xài nên chưa biết",
+    "hàng ok",
+    "hang ok",
+    "ok shop"
+  ],
+  "spam_regex_patterns": [
+    "mang tính chất nhận xu",
+    "tính chất nhận xu",
+    "kiếm xu",
+    "nhận xu là chính",
+    "mua để lấy xu",
+    "lấy xu thôi",
+    "xin xu",
+    "hình ảnh và video mang tính chất",
+    "hình ảnh chỉ mang tính chất",
+    "video chỉ mang tính chất",
+    "hình ảnh mang tính minh hoạ",
+    "hình ảnh không liên quan",
+    "video không liên quan",
+    "đăng để lấy xu",
+    "đánh giá lấy xu",
+    "đánh giá kiếm xu"
+  ]
+}
