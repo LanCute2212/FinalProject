@@ -94,3 +94,7 @@ class BaseCrawler(ABC):
         logger.info(f" - JSON: {json_path}")
 
         return {"csv": csv_path, "json": json_path}
+
+    def reset(self) -> None:
+        """Xóa dữ liệu phiên hiện tại trước khi bắt đầu một lần cào mới."""
+        self.reviews.clear()

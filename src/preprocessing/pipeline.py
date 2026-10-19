@@ -67,7 +67,24 @@ class PreprocessingPipeline:
         """
         Xử lý toàn bộ DataFrame chứa review.
         """
+        df = df.copy()
         logger.info(f"Bắt đầu pipeline tiền xử lý cho {len(df)} bản ghi...")
+
+        if df.empty:
+            for column, default in {
+                "comment_text_raw": "",
+                "comment_text_clean": "",
+                "comment_text_segmented": "",
+                "word_count": 0,
+                "char_count": 0,
+                "is_spam": False,
+                "spam_reason": "EMPTY_DATA",
+                "is_duplicate": False,
+                "is_valid_for_analysis": False,
+                "filter_status": "EMPTY_DATA",
+            }.items():
+                df[column] = pd.Series(dtype=type(default))
+            return df
 
         # Đảm bảo có cột text gốc
         if text_column not in df.columns:

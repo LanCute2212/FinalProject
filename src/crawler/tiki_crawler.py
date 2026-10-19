@@ -57,11 +57,12 @@ class TikiCrawler(BaseCrawler):
         """
         Cào review cho một sản phẩm theo phân trang.
         """
+        self.reset()
+        info = self.get_product_info(product_id)
         if not product_name:
-            info = self.get_product_info(product_id)
             product_name = info["product_name"]
-            if shop_id == "auto":
-                shop_id = info["seller_id"]
+        if shop_id == "auto":
+            shop_id = info["seller_id"]
 
         logger.info(f"Bắt đầu cào review Tiki cho sản phẩm: [{product_name}] (ID: {product_id}, Max: {max_reviews})")
         

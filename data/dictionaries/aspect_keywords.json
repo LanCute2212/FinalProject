@@ -1,0 +1,7 @@
+{
+  "quality": ["chất lượng", "bền", "lỗi", "hỏng", "chập chờn", "âm thanh", "pin", "kết nối", "êm", "nóng"],
+  "delivery": ["giao hàng", "ship", "vận chuyển", "giao nhanh", "giao chậm", "shipper", "nhận hàng"],
+  "packaging": ["đóng gói", "bao bì", "hộp", "móp", "chống sốc", "gãy", "trầy xước"],
+  "price": ["giá", "đắt", "rẻ", "sale", "đáng tiền", "tầm giá"],
+  "service": ["shop", "tư vấn", "bảo hành", "hoàn tiền", "đổi trả", "phản hồi", "rep"]
+}

@@ -39,6 +39,7 @@ class ShopeeCrawler(BaseCrawler):
         """
         Cào review cho 1 sản phẩm của 1 Shop trên Shopee.
         """
+        self.reset()
         logger.info(f"Bắt đầu cào Shopee: Shop ID {shop_id}, Item ID {product_id}, Tên: [{product_name}]")
         
         offset = 0
