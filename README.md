@@ -34,6 +34,7 @@ e:\Đồ án\
 │   ├── generate_sample_data.py  # Sinh dữ liệu mẫu giả lập chuẩn TMĐT (500 reviews, 5 SKU)
 │   ├── run_crawl.py             # CLI cào dữ liệu từ Tiki / Shopee
 │   ├── run_eda.py               # EDA rating, độ dài, nghịch lý sao-text, aspect coverage
+│   ├── run_features.py          # Tạo nhãn sentiment, aspect labels và TF-IDF baseline
 │   └── run_preprocess.py        # CLI chạy tiền xử lý & in báo cáo thống kê định lượng
 ├── requirements.txt
 └── README.md
@@ -56,6 +57,9 @@ Môi trường đã được cấu hình sẵn tại `.venv` (Python 3.11).
 
 # Bước 3: Phân tích khám phá dữ liệu (EDA)
 & ".\.venv\Scripts\python.exe" "scripts\run_eda.py"
+
+# Bước 4: Tạo feature cho sentiment/aspect baseline
+& ".\.venv\Scripts\python.exe" "scripts\run_features.py"
 ```
 
 ### 2.2. Cào dữ liệu thực tế từ sàn TMĐT

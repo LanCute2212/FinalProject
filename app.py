@@ -3,9 +3,13 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from scripts.run_eda import build_report, load_aspects
+from src.features.feature_engineering import FeatureEngineeringPipeline
+
 
 ROOT = Path(__file__).parent
 DEFAULT_DATA = ROOT / "data" / "processed" / "reviews_processed.csv"
+ASPECT_DATA = ROOT / "data" / "dictionaries" / "aspect_keywords.json"
 
 st.set_page_config(page_title="Customer Voice | Review Intelligence", page_icon="✦", layout="wide")
 
@@ -105,3 +109,52 @@ if search:
 columns = ["created_at", "product_name", "rating", "filter_status", "comment_text_raw", "comment_text_clean"]
 st.caption(f"Hiển thị {len(table):,} review")
 st.dataframe(table[[column for column in columns if column in table.columns]], use_container_width=True, hide_index=True)
+
+st.markdown('<div class="section-title">Phân tích nâng cao</div>', unsafe_allow_html=True)
+eda_tab, feature_tab = st.tabs(["EDA", "Phase 5 · Features"])
+
+with eda_tab:
+    if view.empty:
+        st.info("Không có dữ liệu phù hợp với bộ lọc hiện tại.")
+    else:
+        eda_details, eda_summary = build_report(view, load_aspects(str(ASPECT_DATA)))
+        eda_left, eda_right = st.columns(2)
+        with eda_left:
+            st.markdown("#### Nghịch lý rating - nội dung")
+            contradiction = eda_details["rating_text_contradiction"].value_counts().rename_axis("Tín hiệu").to_frame("Số lượng")
+            st.bar_chart(contradiction, color="#ff725e", height=250)
+            st.metric("Review có tín hiệu nghịch lý", eda_summary["rating_text_contradictions"])
+        with eda_right:
+            st.markdown("#### Độ bao phủ aspect trong review hợp lệ")
+            aspect_rows = pd.DataFrame.from_dict(eda_summary["aspect_coverage"], orient="index")
+            aspect_rows.index.name = "Aspect"
+            st.bar_chart(aspect_rows["rate_percent"], color="#9bcf3a", height=250)
+            st.caption("Tỷ lệ được tính trên review hợp lệ trong bộ lọc hiện tại.")
+        st.json({"word_count": eda_summary["word_count"], "contradiction_breakdown": eda_summary["contradiction_breakdown"]})
+
+with feature_tab:
+    valid_view = view[view["is_valid_for_analysis"]].copy() if "is_valid_for_analysis" in view else view.copy()
+    if valid_view.empty:
+        st.info("Cần ít nhất một review hợp lệ để tạo feature.")
+    else:
+        with st.spinner("Đang tạo TF-IDF và nhãn aspect..."):
+            feature_pipeline = FeatureEngineeringPipeline(str(ASPECT_DATA))
+            labels, feature_texts = feature_pipeline.build_labels(valid_view)
+            word_matrix, char_matrix = feature_pipeline.build_features(feature_texts)
+        feature_cols = st.columns(4)
+        with feature_cols[0]: metric("Review đầu vào", f"{len(labels):,}", "review hợp lệ")
+        with feature_cols[1]: metric("Word TF-IDF", f"{word_matrix.shape[1]:,}", "đặc trưng")
+        with feature_cols[2]: metric("Char TF-IDF", f"{char_matrix.shape[1]:,}", "đặc trưng")
+        with feature_cols[3]: metric("Aspect", f"{len(feature_pipeline.aspect_keywords)}", "nhãn multi-label")
+        sentiment_order = ["Tiêu cực", "Trung tính", "Tích cực"]
+        sentiment_chart = labels["sentiment_name"].value_counts().reindex(sentiment_order, fill_value=0).rename_axis("Sentiment").to_frame("Số lượng")
+        sentiment_metrics = st.columns(3)
+        sentiment_counts = labels["sentiment_name"].value_counts()
+        with sentiment_metrics[0]: metric("Tiêu cực", f"{int(sentiment_counts.get('Tiêu cực', 0)):,}", "rating 1-2 sao")
+        with sentiment_metrics[1]: metric("Trung tính", f"{int(sentiment_counts.get('Trung tính', 0)):,}", "rating 3 sao")
+        with sentiment_metrics[2]: metric("Tích cực", f"{int(sentiment_counts.get('Tích cực', 0)):,}", "rating 4-5 sao")
+        st.markdown("#### Phân bố nhãn sentiment baseline")
+        st.bar_chart(sentiment_chart, color="#ff725e", height=250)
+        st.warning("Nhãn sentiment hiện được suy ra từ rating; aspect được gán bằng lexicon. Chưa phải kết quả của mô hình ML.")
+        preview_columns = ["review_id", "rating", "sentiment_name"] + [f"aspect_{name}" for name in feature_pipeline.aspect_keywords]
+        st.dataframe(labels[preview_columns].head(100), use_container_width=True, hide_index=True)
