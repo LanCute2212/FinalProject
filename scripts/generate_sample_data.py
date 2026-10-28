@@ -150,8 +150,8 @@ def generate_sample_dataset(num_records: int = 500, output_dir: str = "data/raw"
             "platform": "mock_shopee_crawler"
         })
 
-    csv_path = os.path.join(output_dir, "sample_reviews_raw.csv")
-    json_path = os.path.join(output_dir, "sample_reviews_raw.json")
+    csv_path = os.path.join(output_dir, "sample_raw.csv")
+    json_path = os.path.join(output_dir, "sample_raw.json")
 
     df = pd.DataFrame(records)
     df.to_csv(csv_path, index=False, encoding="utf-8-sig")

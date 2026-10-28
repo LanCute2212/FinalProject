@@ -56,6 +56,7 @@ class TikiCrawler(BaseCrawler):
     ) -> List[Dict[str, Any]]:
         """
         Cào review cho một sản phẩm theo phân trang.
+        Nếu max_reviews <= 0: cào TOÀN BỘ review hiện có trên sàn.
         """
         self.reset()
         info = self.get_product_info(product_id)
@@ -64,13 +65,17 @@ class TikiCrawler(BaseCrawler):
         if shop_id == "auto":
             shop_id = info["seller_id"]
 
-        logger.info(f"Bắt đầu cào review Tiki cho sản phẩm: [{product_name}] (ID: {product_id}, Max: {max_reviews})")
+        limit_desc = f"tối đa {max_reviews}" if max_reviews > 0 else "TOÀN BỘ (không giới hạn)"
+        logger.info(f"Bắt đầu cào review Tiki cho sản phẩm: [{product_name}] (ID: {product_id}, Giới hạn: {limit_desc})")
         
         page = 1
         limit = 20
         collected_for_item = 0
 
-        while collected_for_item < max_reviews:
+        while True:
+            if max_reviews > 0 and collected_for_item >= max_reviews:
+                break
+
             params = {
                 "product_id": product_id,
                 "include": "comments",
@@ -86,8 +91,14 @@ class TikiCrawler(BaseCrawler):
 
                 json_data = resp.json()
                 data_list = json_data.get("data", [])
+                paging = json_data.get("paging", {})
+                total_on_tiki = paging.get("total", 0)
+
+                if page == 1 and total_on_tiki:
+                    logger.info(f"Phát hiện sản phẩm có tổng cộng {total_on_tiki} review trên sàn Tiki.")
+
                 if not data_list:
-                    logger.info(f"Hết dữ liệu review tại page {page}.")
+                    logger.info(f"Đã duyệt hết toàn bộ review tại page {page}.")
                     break
 
                 for item in data_list:
@@ -114,11 +125,12 @@ class TikiCrawler(BaseCrawler):
                     )
                     if added:
                         collected_for_item += 1
-                        if collected_for_item >= max_reviews:
+                        if max_reviews > 0 and collected_for_item >= max_reviews:
                             break
 
+                logger.info(f"Page {page}: Đã thu thập {collected_for_item} reviews...")
                 page += 1
-                time.sleep(random.uniform(0.8, 1.5))  # Sleep tránh rate-limit
+                time.sleep(random.uniform(0.3, 0.7))  # Delay nhỏ tránh chặn mạng
 
             except Exception as e:
                 logger.error(f"Lỗi kết nối khi cào Tiki page {page}: {e}")

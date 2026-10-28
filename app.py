@@ -1,5 +1,6 @@
+import os
 from pathlib import Path
-
+from datetime import datetime
 import pandas as pd
 import streamlit as st
 
@@ -37,8 +38,17 @@ st.markdown(
 )
 
 
+def get_file_mtime(path: str) -> float:
+    """Lấy thời gian sửa đổi file gần nhất để tự động phát hiện khi có dữ liệu mới."""
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
 @st.cache_data(show_spinner=False)
-def load_data(path: str) -> pd.DataFrame:
+def load_data(path: str, mtime: float) -> pd.DataFrame:
+    """Tự động tải lại dữ liệu khi file thay đổi mtime mà không cần restart server."""
     frame = pd.read_csv(path)
     frame["rating"] = pd.to_numeric(frame["rating"], errors="coerce").fillna(0).astype(int)
     frame["created_at"] = pd.to_datetime(frame["created_at"], errors="coerce")
@@ -57,12 +67,25 @@ st.sidebar.markdown("## ✦ Customer Voice")
 st.sidebar.caption("Review intelligence workspace")
 data_path = st.sidebar.text_input("Đường dẫn dữ liệu", str(DEFAULT_DATA))
 
+# Nút làm mới dữ liệu & hiển thị thời gian cập nhật
+file_mtime = get_file_mtime(data_path)
+col_btn, col_time = st.sidebar.columns([1, 1])
+with col_btn:
+    if st.button("🔄 Làm mới", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+with col_time:
+    if file_mtime > 0:
+        st.caption(f"🕒 {datetime.fromtimestamp(file_mtime).strftime('%H:%M:%S')}")
+
 try:
-    df = load_data(data_path)
+    df = load_data(data_path, file_mtime)
+    st.sidebar.caption(f"📦 Tổng nạp: **{len(df):,}** reviews")
 except Exception as error:
     st.error(f"Không thể đọc dữ liệu: {error}")
     st.stop()
 
+st.sidebar.markdown("---")
 st.sidebar.markdown("### Bộ lọc")
 platforms = sorted(df["platform"].dropna().astype(str).unique())
 selected_platforms = st.sidebar.multiselect("Nền tảng", platforms, default=platforms)
@@ -106,7 +129,7 @@ search = st.text_input("Tìm trong nội dung review", placeholder="Ví dụ: gi
 table = view.copy()
 if search:
     table = table[table["comment_text_raw"].astype(str).str.contains(search, case=False, na=False)]
-columns = ["created_at", "product_name", "rating", "filter_status", "comment_text_raw", "comment_text_clean"]
+columns = ["created_at", "platform", "product_name", "rating", "filter_status", "comment_text_raw", "comment_text_clean"]
 st.caption(f"Hiển thị {len(table):,} review")
 st.dataframe(table[[column for column in columns if column in table.columns]], use_container_width=True, hide_index=True)
 

@@ -12,15 +12,44 @@ from src.utils.logger import get_logger
 
 logger = get_logger("run_preprocess")
 
-def find_latest_raw_file(raw_dir: str = "data/raw") -> str:
-    """Tự động tìm file raw mới nhất trong thư mục nếu người dùng không truyền tham số."""
+def load_all_raw_data(raw_dir: str = "data/raw") -> pd.DataFrame:
+    """
+    Tự động quét và gộp tất cả các file raw CSV trong thư mục data/raw/
+    (Bao gồm Tiki, Sample, Shopee và bất kỳ sàn nào cào sau này).
+    """
     csv_files = glob.glob(os.path.join(raw_dir, "*_raw.csv"))
     if not csv_files:
         csv_files = glob.glob(os.path.join(raw_dir, "*.csv"))
+
     if not csv_files:
-        raise FileNotFoundError(f"Không tìm thấy bất kỳ file CSV nào trong thư mục '{raw_dir}'. Hãy cào dữ liệu hoặc chạy generate_sample_data.py trước!")
-    latest_file = max(csv_files, key=os.path.getmtime)
-    return latest_file
+        raise FileNotFoundError(f"Không tìm thấy bất kỳ file CSV nào trong '{raw_dir}'!")
+
+    dfs = []
+    logger.info(f"Tìm thấy {len(csv_files)} file raw dữ liệu:")
+    for f in csv_files:
+        try:
+            temp_df = pd.read_csv(f)
+            logger.info(f" - Nạp '{os.path.basename(f)}': {len(temp_df)} bản ghi")
+            dfs.append(temp_df)
+        except Exception as e:
+            logger.warning(f"Lỗi khi đọc file {f}: {e}")
+
+    if not dfs:
+        raise ValueError("Không có dữ liệu hợp lệ nào được nạp từ các file raw.")
+
+    combined_df = pd.concat(dfs, ignore_index=True)
+    
+    # Khử trùng lặp theo review_id nếu có
+    if "review_id" in combined_df.columns:
+        combined_df["review_id"] = combined_df["review_id"].astype(str)
+        before_len = len(combined_df)
+        combined_df = combined_df.drop_duplicates(subset=["review_id"], keep="last")
+        dedup_count = before_len - len(combined_df)
+        if dedup_count > 0:
+            logger.info(f"Đã loại bỏ {dedup_count} bản ghi trùng lặp giữa các bộ.")
+
+    logger.info(f"Tổng hợp toàn bộ dữ liệu raw: {len(combined_df)} bản ghi.")
+    return combined_df
 
 def display_statistics(df: pd.DataFrame):
     """In bảng thống kê chi tiết định lượng cho báo cáo đồ án."""
@@ -37,6 +66,14 @@ def display_statistics(df: pd.DataFrame):
     print(f" Review rác / Săn xu (Spam Detected)     : {spam:>6} ({spam/total*100:>5.1f}%)")
     print(f" Review trùng lặp nội dung (Duplicates)  : {duplicate:>6} ({duplicate/total*100:>5.1f}%)")
     print("-" * 70)
+
+    # Phân bố nền tảng
+    if "platform" in df.columns:
+        print(" Phân bố theo Nền tảng (Platform breakdown):")
+        p_counts = df["platform"].value_counts()
+        for p_name, p_cnt in p_counts.items():
+            print(f"   • {p_name:<20}: {p_cnt:>5} reviews ({p_cnt/total*100:>5.1f}%)")
+        print("-" * 70)
 
     # Phân bố rating của tập hợp lệ
     valid_df = df[df["is_valid_for_analysis"]]
@@ -59,26 +96,38 @@ def display_statistics(df: pd.DataFrame):
     samples = df.sample(min(5, len(df)), random_state=42)
     for idx, row in samples.iterrows():
         status = row.get("filter_status", "VALID")
-        print(f"\nID: {row.get('review_id', idx)} | SKU: {row.get('product_id')} | Rating: {row.get('rating')}★ | Trạng thái: [{status}]")
+        print(f"\nID: {row.get('review_id', idx)} | Sàn: {row.get('platform')} | SKU: {row.get('product_id')} | Rating: {row.get('rating')}★ | Trạng thái: [{status}]")
         print(f" • GỐC (RAW)       : {row['comment_text_raw']}")
         print(f" • CHUẨN HÓA (CLEAN): {row['comment_text_clean']}")
         print(f" • TÁCH TỪ (SEGMENT): {row['comment_text_segmented']}")
     print("\n" + "="*70 + "\n")
 
+def run_full_preprocessing(raw_dir: str = "data/raw", input_file: str = None, output_path: str = "data/processed/reviews_processed.csv") -> pd.DataFrame:
+    """Hàm chạy toàn diện tiền xử lý dữ liệu từ tất cả raw files hoặc file chỉ định."""
+    pipeline = PreprocessingPipeline()
+    
+    if input_file:
+        logger.info(f"Tiền xử lý file đơn lẻ: {input_file}")
+        processed_df = pipeline.run_pipeline(input_path=input_file, output_path=output_path)
+    else:
+        logger.info(f"Tiền xử lý và gộp TẤT CẢ các bộ dữ liệu trong '{raw_dir}'...")
+        combined_df = load_all_raw_data(raw_dir=raw_dir)
+        processed_df = pipeline.process_dataframe(combined_df)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        processed_df.to_csv(output_path, index=False, encoding="utf-8-sig")
+        logger.info(f"Đã lưu kết quả gộp vào: {output_path}")
+
+    display_statistics(processed_df)
+    return processed_df
+
 def main():
     parser = argparse.ArgumentParser(description="Chạy Pipeline Tiền xử lý dữ liệu Customer Voice Analytics")
-    parser.add_argument("--input", type=str, default=None, help="Đường dẫn file raw CSV/JSON đầu vào")
+    parser.add_argument("--input", type=str, default=None, help="Đường dẫn file raw CSV/JSON đầu vào (nếu bỏ trống sẽ gộp tất cả)")
+    parser.add_argument("--raw_dir", type=str, default="data/raw", help="Thư mục raw data")
     parser.add_argument("--output", type=str, default="data/processed/reviews_processed.csv", help="Đường dẫn lưu file sạch")
 
     args = parser.parse_args()
-
-    input_path = args.input or find_latest_raw_file()
-    logger.info(f"Sử dụng file dữ liệu đầu vào: {input_path}")
-
-    pipeline = PreprocessingPipeline()
-    processed_df = pipeline.run_pipeline(input_path=input_path, output_path=args.output)
-
-    display_statistics(processed_df)
+    run_full_preprocessing(raw_dir=args.raw_dir, input_file=args.input, output_path=args.output)
 
 if __name__ == "__main__":
     main()

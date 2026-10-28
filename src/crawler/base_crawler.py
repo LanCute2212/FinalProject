@@ -71,25 +71,53 @@ class BaseCrawler(ABC):
         self.reviews.append(record)
         return True
 
-    def save_raw_data(self, output_dir: str = "data/raw", filename_prefix: str = "reviews") -> Dict[str, str]:
-        """Lưu toàn bộ dữ liệu cào được thành 2 định dạng: CSV và JSON (bảo toàn raw data BR11)."""
+    def save_raw_data(self, output_dir: str = "data/raw", filename_prefix: Optional[str] = None) -> Dict[str, str]:
+        """
+        Lưu dữ liệu cào được thành CSV và JSON (BR11).
+        Quy tắc:
+        - Mỗi nền tảng/sàn lưu cố định vào 1 file duy nhất: <platform>_raw.csv và <platform>_raw.json.
+        - Tự động gộp (append) với dữ liệu cũ và loại bỏ trùng lặp theo review_id.
+        """
         os.makedirs(output_dir, exist_ok=True)
         if not self.reviews:
-            logger.warning("Không có dữ liệu review nào để lưu.")
+            logger.warning("Không có dữ liệu review mới nào để lưu.")
             return {}
 
-        csv_path = os.path.join(output_dir, f"{filename_prefix}_{self.platform_name}_raw.csv")
-        json_path = os.path.join(output_dir, f"{filename_prefix}_{self.platform_name}_raw.json")
+        base_name = filename_prefix if filename_prefix else f"{self.platform_name}_raw"
+        csv_path = os.path.join(output_dir, f"{base_name}.csv")
+        json_path = os.path.join(output_dir, f"{base_name}.json")
+
+        new_df = pd.DataFrame(self.reviews)
+
+        # Nếu file đã tồn tại, đọc lên và gộp dữ liệu
+        if os.path.exists(csv_path):
+            try:
+                existing_df = pd.read_csv(csv_path)
+                logger.info(f"Tìm thấy file cũ '{csv_path}' với {len(existing_df)} review. Tiến hành gộp và loại bỏ trùng lặp...")
+                merged_df = pd.concat([existing_df, new_df], ignore_index=True)
+                if "review_id" in merged_df.columns:
+                    merged_df["review_id"] = merged_df["review_id"].astype(str)
+                    before_dedup = len(merged_df)
+                    merged_df = merged_df.drop_duplicates(subset=["review_id"], keep="last")
+                    dedup_count = before_dedup - len(merged_df)
+                    if dedup_count > 0:
+                        logger.info(f"Đã khử {dedup_count} review bị trùng lặp.")
+                final_df = merged_df
+            except Exception as e:
+                logger.warning(f"Không thể đọc file cũ ({e}), tiến hành ghi đè dữ liệu mới.")
+                final_df = new_df
+        else:
+            final_df = new_df
 
         # Lưu CSV
-        df = pd.DataFrame(self.reviews)
-        df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+        final_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
 
         # Lưu JSON
+        json_records = final_df.to_dict(orient="records")
         with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(self.reviews, f, ensure_ascii=False, indent=2)
+            json.dump(json_records, f, ensure_ascii=False, indent=2)
 
-        logger.info(f"Đã lưu {len(self.reviews)} bản ghi thô vào:")
+        logger.info(f"Đã đồng bộ tổng cộng {len(final_df)} bản ghi của sàn '{self.platform_name}' vào:")
         logger.info(f" - CSV : {csv_path}")
         logger.info(f" - JSON: {json_path}")
 
