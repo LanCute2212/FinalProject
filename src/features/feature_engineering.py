@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -61,8 +62,11 @@ class FeatureEngineeringPipeline:
 
     @staticmethod
     def _find_matches(text: str, keywords: List[str]) -> List[str]:
-        normalized = str(text or "").lower()
-        return [keyword for keyword in keywords if keyword.lower() in normalized]
+        normalized = re.sub(r"[\s_]+", " ", str(text or "").lower()).strip()
+        return [
+            keyword for keyword in keywords
+            if re.sub(r"[\s_]+", " ", keyword.lower()).strip() in normalized
+        ]
 
     def build_labels(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         if "rating" not in df.columns:

@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -131,10 +132,13 @@ NEGATIVE_ASPECT_TERMS = ("lỗi", "hỏng", "chậm", "tệ", "thất vọng", "
 
 def build_aspect_sentiment_rows(text: str, aspect_keywords: dict) -> list[dict]:
     """Create an explainable aspect sentiment baseline without extra dependencies."""
-    normalized = str(text or "").lower()
+    normalized = re.sub(r"[\s_]+", " ", str(text or "").lower()).strip()
     rows = []
     for aspect, keywords in aspect_keywords.items():
-        matches = [keyword for keyword in keywords if keyword.lower() in normalized]
+        matches = [
+            keyword for keyword in keywords
+            if re.sub(r"[\s_]+", " ", keyword.lower()).strip() in normalized
+        ]
         if not matches:
             continue
         positive = any(term in normalized for term in POSITIVE_ASPECT_TERMS)
