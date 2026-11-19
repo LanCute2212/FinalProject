@@ -1,37 +1,78 @@
 import os
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.svm import LinearSVC
 
 from scripts.run_eda import build_report, load_aspects
 from src.features.feature_engineering import FeatureEngineeringPipeline
+from src.preprocessing.pipeline import PreprocessingPipeline
 
 
 ROOT = Path(__file__).parent
 DEFAULT_DATA = ROOT / "data" / "processed" / "reviews_processed.csv"
 ASPECT_DATA = ROOT / "data" / "dictionaries" / "aspect_keywords.json"
 
-st.set_page_config(page_title="Customer Voice | Review Intelligence", page_icon="✦", layout="wide")
+st.set_page_config(
+    page_title="Customer Voice | Seller Intelligence",
+    page_icon="✦",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 st.markdown(
     """
     <style>
     @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
-    :root { --ink:#162329; --muted:#6c7b7a; --mint:#c7f36b; --coral:#ff725e; --cream:#f8f6f0; }
+    :root { --ink:#162329; --muted:#6c7b7a; --mint:#c7f36b; --coral:#ff725e; --cream:#f8f6f0; --line:#e6e2d9; }
     .stApp { background:var(--cream); color:var(--ink); font-family:'DM Sans', sans-serif; }
-    [data-testid="stSidebar"] { background:#162329; }
+    [data-testid="stSidebar"] { background:#162329; border-right:1px solid #293b40; }
     [data-testid="stSidebar"] * { color:#f8f6f0 !important; }
-    h1,h2,h3 { font-family:'Space Grotesk', sans-serif !important; letter-spacing:0 !important; }
-    h1 { font-size:2.45rem !important; line-height:1.05 !important; margin-bottom:.2rem !important; }
-    .eyebrow { color:#e45c49; font-size:.75rem; font-weight:700; letter-spacing:.14em; text-transform:uppercase; }
-    .subtitle { color:var(--muted); margin-bottom:1.7rem; }
-    .metric { background:#fff; border:1px solid #e8e5dc; border-radius:8px; padding:1rem 1.1rem; min-height:112px; }
+    [data-testid="stSidebar"] .stRadio > label { color:#aebdbc !important; font-size:.72rem; text-transform:uppercase; letter-spacing:.12em; font-weight:700; }
+    [data-testid="stSidebar"] [role="radiogroup"] { gap:.28rem; }
+    [data-testid="stSidebar"] [role="radiogroup"] label { border-radius:8px; padding:.45rem .6rem; transition:background .15s ease; }
+    [data-testid="stSidebar"] [role="radiogroup"] label:hover { background:#294047; }
+    [data-testid="stMain"] .stRadio [role="radiogroup"] { display:flex; flex-wrap:wrap; gap:.45rem; margin-bottom:1.2rem; }
+    [data-testid="stMain"] .stRadio [role="radiogroup"] label { background:#fff; border:1px solid var(--line); border-radius:999px; padding:.48rem .85rem; color:var(--muted) !important; box-shadow:0 3px 10px rgba(22,35,41,.03); transition:all .15s ease; }
+    [data-testid="stMain"] .stRadio [role="radiogroup"] label:hover { border-color:#b5d65f; color:var(--ink) !important; transform:translateY(-1px); }
+    [data-testid="stMain"] .stRadio [role="radiogroup"] label:has(input:checked) { background:var(--mint); border-color:#b5d65f; color:var(--ink) !important; font-weight:700; }
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h3 { color:#9fb0ad !important; font-size:.72rem !important; text-transform:uppercase; letter-spacing:.12em; }
+    [data-testid="stSidebar"] .stCaption { color:#9fb0ad !important; }
+    [data-testid="stMain"] { padding-top:2.6rem; }
+    h1,h2,h3 { font-family:'Space Grotesk', sans-serif !important; color:var(--ink) !important; }
+    h1 { font-size:2.75rem !important; line-height:1.03 !important; letter-spacing:-.04em !important; }
+    h2 { letter-spacing:-.025em !important; }
+    .eyebrow { color:#e45c49; font-size:.7rem; font-weight:700; letter-spacing:.16em; text-transform:uppercase; }
+    .subtitle { color:var(--muted); font-size:1.02rem; margin-bottom:1.7rem; }
+    .hero { display:flex; justify-content:space-between; align-items:flex-end; background:linear-gradient(135deg,#fff 0%,#f2f5e9 100%); border:1px solid var(--line); border-radius:16px; padding:1.35rem 1.5rem; margin:.4rem 0 1.7rem; box-shadow:0 10px 30px rgba(22,35,41,.04); }
+    .hero-copy { max-width:720px; }
+    .hero-label { color:#e45c49; font-size:.7rem; font-weight:700; letter-spacing:.16em; text-transform:uppercase; }
+    .hero-title { color:var(--ink); font-family:'Space Grotesk'; font-size:2.25rem; font-weight:700; letter-spacing:-.045em; margin:.35rem 0 .45rem; }
+    .hero-note { color:var(--muted); font-size:.95rem; margin:0; }
+    .hero-mark { display:flex; align-items:center; justify-content:center; width:68px; height:68px; background:var(--mint); border-radius:50%; color:var(--ink); font-family:'Space Grotesk'; font-size:1.8rem; font-weight:700; }
+    .nav-label { color:var(--muted); font-size:.72rem; font-weight:700; letter-spacing:.12em; text-transform:uppercase; margin:1.2rem 0 .35rem; }
+    .metric { background:#fff; border:1px solid var(--line); border-radius:12px; padding:1rem 1.1rem; min-height:112px; box-shadow:0 6px 18px rgba(22,35,41,.035); }
     .metric-label { color:var(--muted); font-size:.78rem; text-transform:uppercase; letter-spacing:.08em; font-weight:700; }
     .metric-value { font-family:'Space Grotesk'; font-size:2rem; font-weight:700; margin-top:.35rem; }
     .metric-note { color:var(--muted); font-size:.8rem; margin-top:.2rem; }
     .section-title { font-family:'Space Grotesk'; font-size:1.2rem; font-weight:700; margin:1.5rem 0 .65rem; }
-    .stButton > button { border-radius:6px; border:0; background:var(--mint); color:var(--ink); font-weight:700; }
+    .stButton > button { border-radius:8px; border:1px solid #b5d65f; background:var(--mint); color:var(--ink); font-weight:700; min-height:2.5rem; }
+    .stButton > button:hover { border-color:#8eae37; background:#b9e957; color:var(--ink); }
+    .stDownloadButton > button { border-radius:8px; border:1px solid var(--line); background:#fff; color:var(--ink); font-weight:700; }
+    [data-testid="stDataFrame"] { border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+    [data-testid="stMetric"] { background:#fff; border:1px solid var(--line); border-radius:10px; padding:.8rem 1rem; }
+    [data-testid="stExpander"] { background:#fff; border:1px solid var(--line); border-radius:10px; }
+    .stTabs [data-baseweb="tab-list"] { gap:.25rem; border-bottom:1px solid var(--line); }
+    .stTabs [data-baseweb="tab"] { height:2.7rem; padding:0 .9rem; color:var(--muted); }
+    .stTabs [aria-selected="true"] { color:var(--ink); border-bottom-color:var(--coral); }
+    hr { border-color:var(--line); }
     </style>
     """,
     unsafe_allow_html=True,
@@ -39,7 +80,6 @@ st.markdown(
 
 
 def get_file_mtime(path: str) -> float:
-    """Lấy thời gian sửa đổi file gần nhất để tự động phát hiện khi có dữ liệu mới."""
     try:
         return os.path.getmtime(path)
     except OSError:
@@ -48,7 +88,6 @@ def get_file_mtime(path: str) -> float:
 
 @st.cache_data(show_spinner=False)
 def load_data(path: str, mtime: float) -> pd.DataFrame:
-    """Tự động tải lại dữ liệu khi file thay đổi mtime mà không cần restart server."""
     frame = pd.read_csv(path)
     frame["rating"] = pd.to_numeric(frame["rating"], errors="coerce").fillna(0).astype(int)
     frame["created_at"] = pd.to_datetime(frame["created_at"], errors="coerce")
@@ -63,121 +102,429 @@ def metric(label: str, value: str, note: str) -> None:
     )
 
 
-st.sidebar.markdown("## ✦ Customer Voice")
-st.sidebar.caption("Review intelligence workspace")
-data_path = st.sidebar.text_input("Đường dẫn dữ liệu", str(DEFAULT_DATA))
+def sentiment_summary(frame: pd.DataFrame) -> pd.DataFrame:
+    labels = pd.cut(
+        frame["rating"],
+        bins=[0, 2, 3, 5],
+        labels=["Tiêu cực", "Trung tính", "Tích cực"],
+    )
+    return labels.value_counts().reindex(["Tiêu cực", "Trung tính", "Tích cực"], fill_value=0).rename_axis("Sentiment").to_frame("Reviews")
 
-# Nút làm mới dữ liệu & hiển thị thời gian cập nhật
-file_mtime = get_file_mtime(data_path)
-col_btn, col_time = st.sidebar.columns([1, 1])
-with col_btn:
-    if st.button("🔄 Làm mới", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
-with col_time:
-    if file_mtime > 0:
-        st.caption(f"🕒 {datetime.fromtimestamp(file_mtime).strftime('%H:%M:%S')}")
 
-try:
-    df = load_data(data_path, file_mtime)
-    st.sidebar.caption(f"📦 Tổng nạp: **{len(df):,}** reviews")
-except Exception as error:
-    st.error(f"Không thể đọc dữ liệu: {error}")
-    st.stop()
+def valid_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    if "is_valid_for_analysis" not in frame.columns:
+        return frame
+    return frame[frame["is_valid_for_analysis"].astype(bool)]
 
-st.sidebar.markdown("---")
-st.sidebar.markdown("### Bộ lọc")
-platforms = sorted(df["platform"].dropna().astype(str).unique())
-selected_platforms = st.sidebar.multiselect("Nền tảng", platforms, default=platforms)
-products = sorted(df["product_name"].dropna().astype(str).unique())
-selected_products = st.sidebar.multiselect("Sản phẩm", products, default=[])
-ratings = st.sidebar.slider("Khoảng rating", 1, 5, (1, 5))
-valid_only = st.sidebar.checkbox("Chỉ review hợp lệ", value=False)
 
-view = df[df["platform"].astype(str).isin(selected_platforms) & df["rating"].between(*ratings)]
-if selected_products:
-    view = view[view["product_name"].astype(str).isin(selected_products)]
-if valid_only:
-    view = view[view["is_valid_for_analysis"]]
+def sentiment_label(rating: pd.Series) -> pd.Series:
+    return pd.cut(
+        rating,
+        bins=[0, 2, 3, 5],
+        labels=["negative", "neutral", "positive"],
+    ).astype(str)
 
-st.markdown('<div class="eyebrow">Seller intelligence / 01</div>', unsafe_allow_html=True)
-st.title("Customer Voice")
-st.markdown("<div class='subtitle'>Một góc nhìn sạch và nhanh về chất lượng phản hồi khách hàng.</div>", unsafe_allow_html=True)
 
-total = len(view)
-valid = int(view["is_valid_for_analysis"].sum()) if total else 0
-spam = int(view["is_spam"].sum()) if total else 0
-average = view["rating"].mean() if total else 0
-cols = st.columns(4)
-with cols[0]: metric("Reviews đang xem", f"{total:,}", "sau bộ lọc hiện tại")
-with cols[1]: metric("Rating trung bình", f"{average:.2f} / 5", "tín hiệu hài lòng")
-with cols[2]: metric("Hợp lệ cho NLP", f"{valid:,}", f"{valid / total * 100:.1f}% tập đang xem" if total else "chưa có dữ liệu")
-with cols[3]: metric("Spam phát hiện", f"{spam:,}", f"{spam / total * 100:.1f}% tập đang xem" if total else "chưa có dữ liệu")
-
-left, right = st.columns([1, 1])
-with left:
-    st.markdown('<div class="section-title">Phân bố rating</div>', unsafe_allow_html=True)
-    rating_chart = view["rating"].value_counts().reindex(range(1, 6), fill_value=0).rename_axis("Số sao").to_frame("Reviews")
-    st.bar_chart(rating_chart, color="#ff725e", height=280)
-with right:
-    st.markdown('<div class="section-title">Chất lượng dữ liệu</div>', unsafe_allow_html=True)
-    status_chart = view["filter_status"].value_counts().rename_axis("Trạng thái").to_frame("Số lượng") if total else pd.DataFrame(columns=["Số lượng"])
-    st.bar_chart(status_chart, color="#9bcf3a", height=280)
-
-st.markdown('<div class="section-title">Review explorer</div>', unsafe_allow_html=True)
-search = st.text_input("Tìm trong nội dung review", placeholder="Ví dụ: giao hàng, chất lượng, đóng gói...")
-table = view.copy()
-if search:
-    table = table[table["comment_text_raw"].astype(str).str.contains(search, case=False, na=False)]
-columns = ["created_at", "platform", "product_name", "rating", "filter_status", "comment_text_raw", "comment_text_clean"]
-st.caption(f"Hiển thị {len(table):,} review")
-st.dataframe(table[[column for column in columns if column in table.columns]], use_container_width=True, hide_index=True)
-
-st.markdown('<div class="section-title">Phân tích nâng cao</div>', unsafe_allow_html=True)
-eda_tab, feature_tab = st.tabs(["EDA", "Phase 5 · Features"])
-
-with eda_tab:
+def render_overview(view: pd.DataFrame, aspects: dict) -> None:
+    st.markdown("### Tổng quan vận hành")
     if view.empty:
         st.info("Không có dữ liệu phù hợp với bộ lọc hiện tại.")
-    else:
-        eda_details, eda_summary = build_report(view, load_aspects(str(ASPECT_DATA)))
-        eda_left, eda_right = st.columns(2)
-        with eda_left:
-            st.markdown("#### Nghịch lý rating - nội dung")
-            contradiction = eda_details["rating_text_contradiction"].value_counts().rename_axis("Tín hiệu").to_frame("Số lượng")
-            st.bar_chart(contradiction, color="#ff725e", height=250)
-            st.metric("Review có tín hiệu nghịch lý", eda_summary["rating_text_contradictions"])
-        with eda_right:
-            st.markdown("#### Độ bao phủ aspect trong review hợp lệ")
-            aspect_rows = pd.DataFrame.from_dict(eda_summary["aspect_coverage"], orient="index")
-            aspect_rows.index.name = "Aspect"
-            st.bar_chart(aspect_rows["rate_percent"], color="#9bcf3a", height=250)
-            st.caption("Tỷ lệ được tính trên review hợp lệ trong bộ lọc hiện tại.")
-        st.json({"word_count": eda_summary["word_count"], "contradiction_breakdown": eda_summary["contradiction_breakdown"]})
+        return
 
-with feature_tab:
-    valid_view = view[view["is_valid_for_analysis"]].copy() if "is_valid_for_analysis" in view else view.copy()
-    if valid_view.empty:
-        st.info("Cần ít nhất một review hợp lệ để tạo feature.")
+    valid = view[view.get("is_valid_for_analysis", True).astype(bool)]
+    negative = int((valid["rating"] <= 2).sum()) if not valid.empty else 0
+    try:
+        _, report = build_report(view, aspects)
+        contradictions = report["rating_text_contradictions"]
+    except (KeyError, ValueError):
+        contradictions = 0
+
+    cols = st.columns(4)
+    with cols[0]:
+        metric("Reviews đang xem", f"{len(view):,}", "sau bộ lọc")
+    with cols[1]:
+        metric("Rating trung bình", f"{view['rating'].mean():.2f} / 5", "tín hiệu hài lòng")
+    with cols[2]:
+        metric("Cần ưu tiên", f"{negative:,}", "rating 1–2 sao")
+    with cols[3]:
+        metric("Nghịch lý", f"{contradictions:,}", "rating không khớp nội dung")
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown("#### Phân bố cảm xúc baseline")
+        st.bar_chart(sentiment_summary(valid if not valid.empty else view), color="#ff725e", height=280)
+    with right:
+        st.markdown("#### Sức khỏe dữ liệu")
+        status = view.get("filter_status", pd.Series(["VALID"] * len(view))).value_counts()
+        st.bar_chart(status.rename_axis("Trạng thái").to_frame("Reviews"), color="#9bcf3a", height=280)
+
+    st.markdown("#### Sản phẩm cần ưu tiên theo rating")
+    product_summary = (
+        valid.groupby("product_name", dropna=False)
+        .agg(reviews=("review_id", "count"), average_rating=("rating", "mean"))
+        .sort_values(["average_rating", "reviews"], ascending=[True, False])
+        .reset_index()
+    )
+    product_summary["average_rating"] = product_summary["average_rating"].round(2)
+    st.dataframe(product_summary, use_container_width=True, hide_index=True)
+
+
+def render_attention(view: pd.DataFrame, aspects: dict) -> None:
+    st.markdown("### Review cần chú ý")
+    st.caption("Các tín hiệu giúp seller ưu tiên kiểm tra và cải thiện sản phẩm/dịch vụ.")
+    if view.empty:
+        st.info("Không có dữ liệu phù hợp.")
+        return
+
+    details, _ = build_report(view, aspects)
+    attention = details[
+        (details["rating"] <= 2)
+        | details["rating_text_contradiction"].ne("NONE")
+    ].copy()
+    attention["loai_tin_hieu"] = attention.apply(
+        lambda row: "Nghịch lý rating" if row["rating_text_contradiction"] != "NONE" else "Rating thấp",
+        axis=1,
+    )
+    st.metric("Số review cần kiểm tra", f"{len(attention):,}")
+    columns = [
+        "loai_tin_hieu", "created_at", "platform", "product_name",
+        "rating", "comment_text_raw", "rating_text_contradiction",
+    ]
+    st.dataframe(
+        attention[[column for column in columns if column in attention.columns]],
+        use_container_width=True,
+        hide_index=True,
+    )
+    if not attention.empty:
+        st.download_button(
+            "Tải danh sách cần chú ý",
+            attention.to_csv(index=False).encode("utf-8-sig"),
+            "reviews_attention.csv",
+            "text/csv",
+        )
+
+
+def render_product_analysis(view: pd.DataFrame, aspects: dict) -> None:
+    st.markdown("### Phân tích theo sản phẩm")
+    if view.empty:
+        st.info("Không có dữ liệu phù hợp.")
+        return
+    product_names = sorted(view["product_name"].dropna().astype(str).unique())
+    product = st.selectbox("Chọn sản phẩm", product_names)
+    selected = view[view["product_name"].astype(str) == product]
+    valid = selected[selected.get("is_valid_for_analysis", True).astype(bool)]
+    cols = st.columns(3)
+    with cols[0]:
+        metric("Reviews", f"{len(selected):,}", "sản phẩm đã chọn")
+    with cols[1]:
+        metric("Rating", f"{selected['rating'].mean():.2f} / 5", "trung bình")
+    with cols[2]:
+        metric("Review thấp", f"{int((selected['rating'] <= 2).sum()):,}", "cần xem lại")
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown("#### Sentiment theo rating")
+        st.bar_chart(sentiment_summary(valid if not valid.empty else selected), color="#ff725e")
+    with right:
+        st.markdown("#### Aspect được nhắc đến")
+        _, summary = build_report(selected, aspects)
+        aspect_table = pd.DataFrame.from_dict(summary["aspect_coverage"], orient="index")
+        aspect_table.index.name = "Aspect"
+        st.bar_chart(aspect_table["reviews"], color="#9bcf3a")
+
+    st.markdown("#### Review nổi bật")
+    st.dataframe(
+        selected.sort_values(["rating", "created_at"])[
+            [column for column in ["created_at", "rating", "comment_text_raw", "filter_status"] if column in selected.columns]
+        ].head(50),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+def render_alerts(view: pd.DataFrame, aspects: dict) -> None:
+    st.markdown("### Trung tâm cảnh báo")
+    valid = valid_rows(view)
+    if valid.empty:
+        st.info("Chưa có review hợp lệ để tạo cảnh báo.")
+        return
+    details, summary = build_report(view, aspects)
+    negative_rate = float((valid["rating"] <= 2).mean() * 100)
+    alerts = []
+    if negative_rate >= 15:
+        alerts.append(("Cao", f"Tỷ lệ review 1–2 sao đang ở mức {negative_rate:.1f}%."))
+    if summary["rating_text_contradictions"] > 0:
+        alerts.append(("Trung bình", f"Có {summary['rating_text_contradictions']:,} review có rating không khớp nội dung."))
+    coverage = summary["aspect_coverage"]
+    if coverage:
+        top_aspect = max(coverage, key=lambda name: coverage[name]["reviews"])
+        alerts.append(("Theo dõi", f"Aspect được nhắc đến nhiều nhất là {top_aspect}."))
+    if not alerts:
+        st.success("Chưa phát hiện cảnh báo nổi bật trong phạm vi đang xem.")
+    for level, message in alerts:
+        (st.error if level == "Cao" else st.warning)(f"**{level}:** {message}")
+
+    st.markdown("#### Gợi ý hành động")
+    if negative_rate >= 15:
+        st.write("Ưu tiên đọc các review rating thấp và kiểm tra sản phẩm hoặc quy trình dịch vụ liên quan.")
+    if coverage:
+        st.write(f"Tập trung phân tích các review đề cập đến aspect **{top_aspect}** để tìm nguyên nhân lặp lại.")
+    st.write("Dùng bộ lọc sản phẩm và nút xuất dữ liệu để giao cho bộ phận phụ trách xử lý.")
+
+
+def render_labeling(view: pd.DataFrame, aspects: dict) -> None:
+    st.markdown("### Gán nhãn thủ công")
+    st.caption("Nhãn này tạo tập dữ liệu kiểm tra/huấn luyện; dữ liệu gốc không bị thay đổi.")
+    valid = valid_rows(view)
+    if valid.empty:
+        st.info("Chưa có review hợp lệ.")
+        return
+    if "manual_labels" not in st.session_state:
+        st.session_state.manual_labels = []
+    review_ids = valid["review_id"].astype(str).tolist()
+    review_id = st.selectbox("Chọn review", review_ids)
+    row = valid[valid["review_id"].astype(str) == review_id].iloc[0]
+    st.info(str(row.get("comment_text_raw", "")))
+    with st.form("manual_label_form"):
+        sentiment = st.selectbox("Nhãn sentiment", ["Tiêu cực", "Trung tính", "Tích cực"])
+        selected_aspects = st.multiselect("Aspect", list(aspects), format_func=lambda value: value.title())
+        submitted = st.form_submit_button("Lưu nhãn")
+    if submitted:
+        record = {
+            "review_id": review_id,
+            "text": str(row.get("comment_text_raw", "")),
+            "sentiment_manual": sentiment,
+            "aspects_manual": ", ".join(selected_aspects),
+        }
+        st.session_state.manual_labels = [
+            item for item in st.session_state.manual_labels if item["review_id"] != review_id
+        ]
+        st.session_state.manual_labels.append(record)
+        st.success("Đã lưu nhãn trong phiên làm việc.")
+    labels = pd.DataFrame(st.session_state.manual_labels)
+    if not labels.empty:
+        st.dataframe(labels, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Xuất nhãn thủ công",
+            labels.to_csv(index=False).encode("utf-8-sig"),
+            "manual_labels.csv",
+            "text/csv",
+        )
+
+
+def render_model_lab(view: pd.DataFrame) -> None:
+    st.markdown("### Model Lab · Sentiment")
+    st.caption("Baseline minh họa: TF-IDF kết hợp Logistic Regression hoặc Linear SVM.")
+    data = valid_rows(view).copy()
+    data["text"] = data.get("comment_text_segmented", data["comment_text_raw"]).fillna("").astype(str)
+    data["label"] = sentiment_label(data["rating"])
+    data = data[data["label"].isin(["negative", "neutral", "positive"]) & data["text"].str.strip().ne("")]
+    counts = data["label"].value_counts()
+    if len(data) < 12 or counts.min() < 2:
+        st.warning("Cần ít nhất 12 review hợp lệ và tối thiểu 2 review cho mỗi lớp để huấn luyện.")
+        return
+    model_name = st.selectbox("Mô hình", ["Logistic Regression", "Linear SVM"])
+    test_size = st.slider("Tỷ lệ test", 0.2, 0.4, 0.25, 0.05)
+    if st.button("Huấn luyện và đánh giá", type="primary"):
+        x_train, x_test, y_train, y_test = train_test_split(
+            data["text"], data["label"], test_size=test_size, random_state=42, stratify=data["label"]
+        )
+        classifier = LogisticRegression(max_iter=1000, class_weight="balanced") if model_name == "Logistic Regression" else LinearSVC(class_weight="balanced")
+        model = Pipeline([
+            ("tfidf", TfidfVectorizer(ngram_range=(1, 2), min_df=1, sublinear_tf=True)),
+            ("classifier", classifier),
+        ])
+        model.fit(x_train, y_train)
+        predictions = model.predict(x_test)
+        report = classification_report(y_test, predictions, output_dict=True, zero_division=0)
+        metrics = st.columns(4)
+        with metrics[0]:
+            metric("Accuracy", f"{accuracy_score(y_test, predictions):.3f}", "tập test")
+        with metrics[1]:
+            metric("Precision", f"{report['macro avg']['precision']:.3f}", "macro average")
+        with metrics[2]:
+            metric("Recall", f"{report['macro avg']['recall']:.3f}", "macro average")
+        with metrics[3]:
+            metric("Macro-F1", f"{report['macro avg']['f1-score']:.3f}", "chỉ số chính")
+        labels = ["negative", "neutral", "positive"]
+        matrix = pd.DataFrame(confusion_matrix(y_test, predictions, labels=labels), index=labels, columns=labels)
+        st.markdown("#### Confusion Matrix")
+        st.dataframe(matrix, use_container_width=True)
+        st.json({label: report[label] for label in labels if label in report})
+        st.session_state["trained_model"] = model
+    if "trained_model" in st.session_state:
+        st.success("Mô hình đang có trong phiên làm việc. Có thể dùng để thử dự đoán ở trang Mô phỏng.")
+
+
+def render_report(view: pd.DataFrame, aspects: dict) -> None:
+    st.markdown("### Báo cáo seller")
+    if view.empty:
+        st.info("Không có dữ liệu để tạo báo cáo.")
+        return
+    valid = valid_rows(view)
+    _, summary = build_report(view, aspects)
+    report_rows = [
+        {"Chỉ số": "Tổng review", "Giá trị": len(view)},
+        {"Chỉ số": "Review hợp lệ", "Giá trị": len(valid)},
+        {"Chỉ số": "Rating trung bình", "Giá trị": round(float(view["rating"].mean()), 2)},
+        {"Chỉ số": "Review 1–2 sao", "Giá trị": int((view["rating"] <= 2).sum())},
+        {"Chỉ số": "Nghịch lý rating", "Giá trị": summary["rating_text_contradictions"]},
+    ]
+    report = pd.DataFrame(report_rows)
+    st.dataframe(report, use_container_width=True, hide_index=True)
+    st.download_button(
+        "Xuất báo cáo CSV",
+        report.to_csv(index=False).encode("utf-8-sig"),
+        "seller_report.csv",
+        "text/csv",
+    )
+
+
+def render_review_explorer(view: pd.DataFrame) -> None:
+    st.markdown("### Tra cứu review")
+    search = st.text_input("Tìm trong nội dung", placeholder="Ví dụ: giao hàng, chất lượng, đóng gói...")
+    status_options = sorted(view["filter_status"].dropna().astype(str).unique()) if "filter_status" in view else []
+    statuses = st.multiselect("Trạng thái", status_options, default=status_options)
+    table = view.copy()
+    if search:
+        table = table[table["comment_text_raw"].astype(str).str.contains(search, case=False, na=False)]
+    if statuses and "filter_status" in table:
+        table = table[table["filter_status"].astype(str).isin(statuses)]
+    columns = ["created_at", "platform", "product_name", "rating", "filter_status", "comment_text_raw", "comment_text_clean"]
+    st.caption(f"Hiển thị {len(table):,} review")
+    st.dataframe(table[[column for column in columns if column in table.columns]], use_container_width=True, hide_index=True)
+    if not table.empty:
+        st.download_button("Xuất kết quả lọc", table.to_csv(index=False).encode("utf-8-sig"), "reviews_filtered.csv", "text/csv")
+
+
+def render_simulator(aspects: dict) -> None:
+    st.markdown("### Mô phỏng bình luận")
+    st.caption("Dùng để kiểm thử pipeline; dữ liệu mô phỏng không được trộn vào thống kê review thật.")
+    examples = {
+        "Tích cực": "Sản phẩm dùng rất tốt, đóng gói cẩn thận và giao hàng nhanh.",
+        "Tiêu cực": "Hàng bị lỗi, giao hàng chậm và shop phản hồi rất lâu.",
+        "Nhiều khía cạnh": "Sản phẩm tốt nhưng giao hàng chậm, hộp bị móp và giá hơi đắt.",
+        "Teencode + emoji": "sp okela nhưng ship hơi lâu nha 😐",
+        "Spam": "hình ảnh mang tính chất nhận xu",
+    }
+    selected_example = st.selectbox("Kịch bản mẫu", ["Tự nhập", *examples])
+    default_text = "" if selected_example == "Tự nhập" else examples[selected_example]
+    text = st.text_area("Nội dung bình luận", value=default_text, height=120)
+    rating = st.slider("Rating giả lập", 1, 5, 4)
+    if st.button("Phân tích bình luận", type="primary"):
+        if not text.strip():
+            st.warning("Hãy nhập nội dung bình luận.")
+            return
+        pipeline = PreprocessingPipeline()
+        processed = pipeline.process_single_text(text)
+        sample = pd.DataFrame([{
+            "review_id": "SIMULATED_001",
+            "rating": rating,
+            "comment_text_raw": text,
+            **processed,
+        }])
+        feature_pipeline = FeatureEngineeringPipeline(str(ASPECT_DATA))
+        labels, _ = feature_pipeline.build_labels(sample)
+        labels = labels.iloc[0]
+        st.markdown("#### Kết quả mô phỏng")
+        cols = st.columns(3)
+        with cols[0]:
+            metric("Sentiment baseline", str(labels["sentiment_name"]), f"theo rating {rating} sao")
+        with cols[1]:
+            metric("Trạng thái", "SPAM" if processed["is_spam"] else "VALID", processed["spam_reason"])
+        with cols[2]:
+            matched = sum(int(labels[f"aspect_{name}"]) for name in aspects)
+            metric("Aspect phát hiện", str(matched), "theo lexicon")
+        aspect_result = pd.DataFrame(
+            [{
+                "aspect": name,
+                "phát hiện": "Có" if labels[f"aspect_{name}"] else "Không",
+                "từ khóa khớp": labels[f"aspect_{name}_matches"],
+            } for name in aspects]
+        )
+        st.dataframe(aspect_result, use_container_width=True, hide_index=True)
+        with st.expander("Xem từng bước xử lý"):
+            st.write({"clean": processed["comment_text_clean"], "segmented": processed["comment_text_segmented"]})
+
+
+def main() -> None:
+    st.sidebar.markdown(
+        '<div style="font-family:Space Grotesk;font-size:1.35rem;font-weight:700;letter-spacing:-.04em">✦ Customer Voice</div>'
+        '<div style="color:#9fb0ad;font-size:.78rem;margin:.25rem 0 1.4rem">Seller intelligence workspace</div>',
+        unsafe_allow_html=True,
+    )
+    data_path = st.sidebar.text_input("Đường dẫn dữ liệu", str(DEFAULT_DATA))
+    file_mtime = get_file_mtime(data_path)
+    if st.sidebar.button("Làm mới dữ liệu", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+
+    try:
+        df = load_data(data_path, file_mtime)
+    except Exception as error:
+        st.error(f"Không thể đọc dữ liệu: {error}")
+        st.stop()
+
+    st.sidebar.caption(f"Cập nhật: {datetime.fromtimestamp(file_mtime).strftime('%d/%m/%Y %H:%M') if file_mtime else 'chưa có'}")
+    st.sidebar.caption(f"Đang nạp **{len(df):,}** review")
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Bộ lọc dữ liệu")
+    platforms = sorted(df["platform"].dropna().astype(str).unique())
+    selected_platforms = st.sidebar.multiselect("Nền tảng", platforms, default=platforms)
+    products = sorted(df["product_name"].dropna().astype(str).unique())
+    selected_products = st.sidebar.multiselect("Sản phẩm", products, default=[])
+    ratings = st.sidebar.slider("Khoảng rating", 1, 5, (1, 5))
+    valid_only = st.sidebar.checkbox("Chỉ review hợp lệ", value=False)
+    view = df[df["platform"].astype(str).isin(selected_platforms) & df["rating"].between(*ratings)]
+    if selected_products:
+        view = view[view["product_name"].astype(str).isin(selected_products)]
+    if valid_only and "is_valid_for_analysis" in view:
+        view = view[view["is_valid_for_analysis"].astype(bool)]
+
+    st.markdown(
+        '<div class="hero"><div class="hero-copy"><div class="hero-label">Seller intelligence / workspace</div>'
+        '<div class="hero-title">Hiểu khách hàng. Cải thiện đúng chỗ.</div>'
+        '<p class="hero-note">Biến hàng nghìn review thành tín hiệu rõ ràng về sản phẩm, dịch vụ và trải nghiệm mua hàng.</p>'
+        '</div><div class="hero-mark">✦</div></div>',
+        unsafe_allow_html=True,
+    )
+    aspects = load_aspects(str(ASPECT_DATA))
+    st.markdown('<div class="nav-label">Không gian làm việc</div>', unsafe_allow_html=True)
+    page = st.radio(
+        "Đi tới",
+        [
+            "Tổng quan",
+            "Theo sản phẩm",
+            "Review cần chú ý",
+            "Cảnh báo & insight",
+            "Tra cứu review",
+            "Gán nhãn thủ công",
+            "Model Lab",
+            "Báo cáo",
+            "Mô phỏng bình luận",
+        ],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    if page == "Tổng quan":
+        render_overview(view, aspects)
+    elif page == "Theo sản phẩm":
+        render_product_analysis(view, aspects)
+    elif page == "Review cần chú ý":
+        render_attention(view, aspects)
+    elif page == "Cảnh báo & insight":
+        render_alerts(view, aspects)
+    elif page == "Tra cứu review":
+        render_review_explorer(view)
+    elif page == "Gán nhãn thủ công":
+        render_labeling(view, aspects)
+    elif page == "Model Lab":
+        render_model_lab(view)
+    elif page == "Báo cáo":
+        render_report(view, aspects)
     else:
-        with st.spinner("Đang tạo TF-IDF và nhãn aspect..."):
-            feature_pipeline = FeatureEngineeringPipeline(str(ASPECT_DATA))
-            labels, feature_texts = feature_pipeline.build_labels(valid_view)
-            word_matrix, char_matrix = feature_pipeline.build_features(feature_texts)
-        feature_cols = st.columns(4)
-        with feature_cols[0]: metric("Review đầu vào", f"{len(labels):,}", "review hợp lệ")
-        with feature_cols[1]: metric("Word TF-IDF", f"{word_matrix.shape[1]:,}", "đặc trưng")
-        with feature_cols[2]: metric("Char TF-IDF", f"{char_matrix.shape[1]:,}", "đặc trưng")
-        with feature_cols[3]: metric("Aspect", f"{len(feature_pipeline.aspect_keywords)}", "nhãn multi-label")
-        sentiment_order = ["Tiêu cực", "Trung tính", "Tích cực"]
-        sentiment_chart = labels["sentiment_name"].value_counts().reindex(sentiment_order, fill_value=0).rename_axis("Sentiment").to_frame("Số lượng")
-        sentiment_metrics = st.columns(3)
-        sentiment_counts = labels["sentiment_name"].value_counts()
-        with sentiment_metrics[0]: metric("Tiêu cực", f"{int(sentiment_counts.get('Tiêu cực', 0)):,}", "rating 1-2 sao")
-        with sentiment_metrics[1]: metric("Trung tính", f"{int(sentiment_counts.get('Trung tính', 0)):,}", "rating 3 sao")
-        with sentiment_metrics[2]: metric("Tích cực", f"{int(sentiment_counts.get('Tích cực', 0)):,}", "rating 4-5 sao")
-        st.markdown("#### Phân bố nhãn sentiment baseline")
-        st.bar_chart(sentiment_chart, color="#ff725e", height=250)
-        st.warning("Nhãn sentiment hiện được suy ra từ rating; aspect được gán bằng lexicon. Chưa phải kết quả của mô hình ML.")
-        preview_columns = ["review_id", "rating", "sentiment_name"] + [f"aspect_{name}" for name in feature_pipeline.aspect_keywords]
-        st.dataframe(labels[preview_columns].head(100), use_container_width=True, hide_index=True)
+        render_simulator(aspects)
+
+
+if __name__ == "__main__":
+    main()
