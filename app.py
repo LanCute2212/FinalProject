@@ -125,6 +125,30 @@ def sentiment_label(rating: pd.Series) -> pd.Series:
     ).astype(str)
 
 
+POSITIVE_ASPECT_TERMS = ("tốt", "hay", "đẹp", "nhanh", "ổn", "hài lòng", "ưng ý", "mượt", "đáng tiền")
+NEGATIVE_ASPECT_TERMS = ("lỗi", "hỏng", "chậm", "tệ", "thất vọng", "móp", "trầy", "đắt", "kém", "chập chờn")
+
+
+def build_aspect_sentiment_rows(text: str, aspect_keywords: dict) -> list[dict]:
+    """Create an explainable aspect sentiment baseline without extra dependencies."""
+    normalized = str(text or "").lower()
+    rows = []
+    for aspect, keywords in aspect_keywords.items():
+        matches = [keyword for keyword in keywords if keyword.lower() in normalized]
+        if not matches:
+            continue
+        positive = any(term in normalized for term in POSITIVE_ASPECT_TERMS)
+        negative = any(term in normalized for term in NEGATIVE_ASPECT_TERMS)
+        sentiment = (
+            "Hỗn hợp" if positive and negative
+            else "Tiêu cực" if negative
+            else "Tích cực" if positive
+            else "Trung tính"
+        )
+        rows.append({"aspect": aspect, "sentiment": sentiment, "matched_keywords": ", ".join(matches)})
+    return rows
+
+
 def render_overview(view: pd.DataFrame, aspects: dict) -> None:
     st.markdown("### Tổng quan vận hành")
     if view.empty:
@@ -167,6 +191,19 @@ def render_overview(view: pd.DataFrame, aspects: dict) -> None:
     )
     product_summary["average_rating"] = product_summary["average_rating"].round(2)
     st.dataframe(product_summary, use_container_width=True, hide_index=True)
+
+    st.markdown("#### Xu hướng sentiment theo thời gian")
+    trend = valid.dropna(subset=["created_at"]).copy()
+    if not trend.empty:
+        trend["sentiment"] = sentiment_label(trend["rating"]).map(
+            {"negative": "Tiêu cực", "neutral": "Trung tính", "positive": "Tích cực"}
+        )
+        trend["tháng"] = trend["created_at"].dt.to_period("M").astype(str)
+        chart = trend.pivot_table(
+            index="tháng", columns="sentiment", values="review_id",
+            aggfunc="count", fill_value=0,
+        ).reindex(columns=["Tiêu cực", "Trung tính", "Tích cực"], fill_value=0)
+        st.line_chart(chart)
 
 
 def render_attention(view: pd.DataFrame, aspects: dict) -> None:
@@ -227,10 +264,28 @@ def render_product_analysis(view: pd.DataFrame, aspects: dict) -> None:
         st.bar_chart(sentiment_summary(valid if not valid.empty else selected), color="#ff725e")
     with right:
         st.markdown("#### Aspect được nhắc đến")
-        _, summary = build_report(selected, aspects)
-        aspect_table = pd.DataFrame.from_dict(summary["aspect_coverage"], orient="index")
-        aspect_table.index.name = "Aspect"
-        st.bar_chart(aspect_table["reviews"], color="#9bcf3a")
+        selected_valid = valid_rows(selected)
+        text_column = "comment_text_clean" if "comment_text_clean" in selected_valid else "comment_text_raw"
+        aspect_rows = []
+        for aspect, keywords in aspects.items():
+            count = selected_valid[text_column].fillna("").astype(str).map(
+                lambda text: bool(build_aspect_sentiment_rows(text, {aspect: keywords}))
+            ).sum()
+            aspect_rows.append({"aspect": aspect, "reviews": int(count)})
+        st.bar_chart(pd.DataFrame(aspect_rows).set_index("aspect"), color="#9bcf3a")
+
+    st.markdown("#### Sentiment theo thời gian")
+    product_trend = valid.dropna(subset=["created_at"]).copy()
+    if not product_trend.empty:
+        product_trend["sentiment"] = sentiment_label(product_trend["rating"]).map(
+            {"negative": "Tiêu cực", "neutral": "Trung tính", "positive": "Tích cực"}
+        )
+        product_trend["tháng"] = product_trend["created_at"].dt.to_period("M").astype(str)
+        chart = product_trend.pivot_table(
+            index="tháng", columns="sentiment", values="review_id",
+            aggfunc="count", fill_value=0,
+        ).reindex(columns=["Tiêu cực", "Trung tính", "Tích cực"], fill_value=0)
+        st.line_chart(chart)
 
     st.markdown("#### Review nổi bật")
     st.dataframe(
@@ -354,6 +409,28 @@ def render_model_lab(view: pd.DataFrame) -> None:
         st.session_state["trained_model"] = model
     if "trained_model" in st.session_state:
         st.success("Mô hình đang có trong phiên làm việc. Có thể dùng để thử dự đoán ở trang Mô phỏng.")
+
+
+def render_aspect_analysis(view: pd.DataFrame, aspects: dict) -> None:
+    st.markdown("### Sentiment theo khía cạnh")
+    st.caption("Baseline giải thích được: phát hiện aspect bằng lexicon và suy ra sắc thái từ tín hiệu trong câu.")
+    valid = valid_rows(view)
+    if valid.empty:
+        st.info("Chưa có review hợp lệ.")
+        return
+    text_column = "comment_text_clean" if "comment_text_clean" in valid else "comment_text_raw"
+    rows = []
+    for _, row in valid.iterrows():
+        rows.extend(build_aspect_sentiment_rows(str(row[text_column]), aspects))
+    if not rows:
+        st.info("Chưa phát hiện aspect trong phạm vi đang xem.")
+        return
+    result = pd.DataFrame(rows)
+    counts = result.groupby(["aspect", "sentiment"]).size().unstack(fill_value=0)
+    st.bar_chart(
+        counts.reindex(columns=["Tiêu cực", "Trung tính", "Hỗn hợp", "Tích cực"], fill_value=0)
+    )
+    st.dataframe(result, use_container_width=True, hide_index=True)
 
 
 def render_report(view: pd.DataFrame, aspects: dict) -> None:
@@ -495,6 +572,7 @@ def main() -> None:
         [
             "Tổng quan",
             "Theo sản phẩm",
+            "Sentiment theo aspect",
             "Review cần chú ý",
             "Cảnh báo & insight",
             "Tra cứu review",
@@ -510,6 +588,8 @@ def main() -> None:
         render_overview(view, aspects)
     elif page == "Theo sản phẩm":
         render_product_analysis(view, aspects)
+    elif page == "Sentiment theo aspect":
+        render_aspect_analysis(view, aspects)
     elif page == "Review cần chú ý":
         render_attention(view, aspects)
     elif page == "Cảnh báo & insight":
