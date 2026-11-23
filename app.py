@@ -130,7 +130,7 @@ POSITIVE_ASPECT_TERMS = ("tốt", "hay", "đẹp", "nhanh", "ổn", "hài lòng"
 NEGATIVE_ASPECT_TERMS = ("lỗi", "hỏng", "chậm", "tệ", "thất vọng", "móp", "trầy", "đắt", "kém", "chập chờn")
 
 
-def build_aspect_sentiment_rows(text: str, aspect_keywords: dict) -> list[dict]:
+def build_aspect_sentiment_rows(text: str, aspect_keywords: dict, meta: dict = None) -> list[dict]:
     """Create an explainable aspect sentiment baseline without extra dependencies."""
     normalized = re.sub(r"[\s_]+", " ", str(text or "").lower()).strip()
     rows = []
@@ -149,7 +149,10 @@ def build_aspect_sentiment_rows(text: str, aspect_keywords: dict) -> list[dict]:
             else "Tích cực" if positive
             else "Trung tính"
         )
-        rows.append({"aspect": aspect, "sentiment": sentiment, "matched_keywords": ", ".join(matches)})
+        row_dict = {"aspect": aspect, "sentiment": sentiment, "matched_keywords": ", ".join(matches)}
+        if meta:
+            row_dict.update(meta)
+        rows.append(row_dict)
     return rows
 
 
@@ -186,10 +189,61 @@ def render_overview(view: pd.DataFrame, aspects: dict) -> None:
         status = view.get("filter_status", pd.Series(["VALID"] * len(view))).value_counts()
         st.bar_chart(status.rename_axis("Trạng thái").to_frame("Reviews"), color="#9bcf3a", height=280)
 
+    # Thống kê phân bố theo Ngành hàng & Nền tảng
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("#### Phân bố theo ngành hàng")
+        if "category" in view.columns:
+            cat_counts = view["category"].value_counts().rename_axis("Ngành hàng").to_frame("Reviews")
+            st.bar_chart(cat_counts, color="#3a86ff", height=260)
+        else:
+            st.caption("Chưa có dữ liệu ngành hàng.")
+    with c2:
+        st.markdown("#### Phân bố theo nền tảng sàn")
+        if "platform" in view.columns:
+            plat_counts = view["platform"].value_counts().rename_axis("Nền tảng").to_frame("Reviews")
+            st.bar_chart(plat_counts, color="#ffbe0b", height=260)
+        else:
+            st.caption("Chưa có dữ liệu nền tảng.")
+
+    st.markdown("#### Bảng tổng hợp theo ngành hàng")
+    if "category" in view.columns:
+        cat_summary = (
+            valid.groupby("category", dropna=False)
+            .agg(
+                reviews=("review_id", "count"),
+                average_rating=("rating", "mean"),
+                total_likes=("like_count", "sum") if "like_count" in valid.columns else ("review_id", "count"),
+                low_rating_reviews=("rating", lambda s: int((s <= 2).sum()))
+            )
+            .sort_values(["reviews"], ascending=[False])
+            .reset_index()
+        )
+        cat_summary["average_rating"] = cat_summary["average_rating"].round(2)
+        cat_summary.rename(columns={
+            "category": "Ngành hàng",
+            "reviews": "Số review hợp lệ",
+            "average_rating": "Rating trung bình",
+            "total_likes": "Tổng lượt thích",
+            "low_rating_reviews": "Review 1–2★"
+        }, inplace=True)
+        st.dataframe(cat_summary, use_container_width=True, hide_index=True)
+
     st.markdown("#### Sản phẩm cần ưu tiên theo rating")
+    agg_dict = {
+        "reviews": ("review_id", "count"),
+        "average_rating": ("rating", "mean"),
+    }
+    if "category" in valid.columns:
+        agg_dict["category"] = ("category", "first")
+    if "platform" in valid.columns:
+        agg_dict["platform"] = ("platform", "first")
+    if "like_count" in valid.columns:
+        agg_dict["total_likes"] = ("like_count", "sum")
+
     product_summary = (
         valid.groupby("product_name", dropna=False)
-        .agg(reviews=("review_id", "count"), average_rating=("rating", "mean"))
+        .agg(**agg_dict)
         .sort_values(["average_rating", "reviews"], ascending=[True, False])
         .reset_index()
     )
@@ -226,7 +280,18 @@ def render_attention(view: pd.DataFrame, aspects: dict) -> None:
         lambda row: "Nghịch lý rating" if row["rating_text_contradiction"] != "NONE" else "Rating thấp",
         axis=1,
     )
-    st.metric("Số review cần kiểm tra", f"{len(attention):,}")
+    col_c1, col_c2 = st.columns([1, 2])
+    with col_c1:
+        st.metric("Số review cần kiểm tra", f"{len(attention):,}")
+    with col_c2:
+        sig_options = ["Tất cả", "Rating thấp (1–2★)", "Nghịch lý rating"]
+        sig_choice = st.selectbox("Lọc loại tín hiệu", sig_options, label_visibility="collapsed")
+    
+    if sig_choice == "Rating thấp (1–2★)":
+        attention = attention[attention["loai_tin_hieu"] == "Rating thấp"]
+    elif sig_choice == "Nghịch lý rating":
+        attention = attention[attention["loai_tin_hieu"] == "Nghịch lý rating"]
+
     columns = [
         "loai_tin_hieu", "created_at", "platform", "category", "product_name",
         "reviewer_name", "rating", "like_count", "comment_text_raw", "rating_text_contradiction",
@@ -254,6 +319,19 @@ def render_product_analysis(view: pd.DataFrame, aspects: dict) -> None:
     product = st.selectbox("Chọn sản phẩm", product_names)
     selected = view[view["product_name"].astype(str) == product]
     valid = selected[selected.get("is_valid_for_analysis", True).astype(bool)]
+
+    # Product Metadata Badge
+    cat_val = selected["category"].dropna().iloc[0] if "category" in selected.columns and not selected["category"].dropna().empty else "Chưa phân loại"
+    plat_val = selected["platform"].dropna().iloc[0] if "platform" in selected.columns and not selected["platform"].dropna().empty else "N/A"
+    max_likes = int(selected["like_count"].max()) if "like_count" in selected.columns and not selected["like_count"].dropna().empty else 0
+
+    st.markdown(
+        f'<div style="background:#fff;border:1px solid #e6e2d9;border-radius:10px;padding:0.6rem 0.9rem;margin-bottom:0.9rem;font-size:0.9rem;">'
+        f'📁 Ngành hàng: <b>{cat_val}</b> &nbsp;|&nbsp; 🛒 Nền tảng: <b>{plat_val}</b> &nbsp;|&nbsp; 👍 Lượt thích cao nhất: <b>{max_likes:,}</b>'
+        f'</div>',
+        unsafe_allow_html=True
+    )
+
     cols = st.columns(3)
     with cols[0]:
         metric("Reviews", f"{len(selected):,}", "sản phẩm đã chọn")
@@ -291,18 +369,27 @@ def render_product_analysis(view: pd.DataFrame, aspects: dict) -> None:
         ).reindex(columns=["Tiêu cực", "Trung tính", "Tích cực"], fill_value=0)
         st.line_chart(chart)
 
-    st.markdown("#### Review nổi bật")
-    st.dataframe(
-        selected.sort_values(["rating", "created_at"])[
-            [column for column in ["created_at", "rating", "comment_text_raw", "filter_status"] if column in selected.columns]
-        ].head(50),
-        use_container_width=True,
-        hide_index=True,
-    )
+    st.markdown("#### Review nổi bật của sản phẩm")
+    col_filter_sort, _ = st.columns([2, 2])
+    with col_filter_sort:
+        sort_p = st.selectbox("Sắp xếp review", ["Nhiều lượt thích nhất", "Rating thấp nhất (1–2★)", "Rating cao nhất (5★)", "Mới nhất"], key="prod_sort")
+
+    prod_reviews = selected.copy()
+    if sort_p == "Nhiều lượt thích nhất" and "like_count" in prod_reviews.columns:
+        prod_reviews = prod_reviews.sort_values(by="like_count", ascending=False)
+    elif sort_p == "Rating thấp nhất (1–2★)":
+        prod_reviews = prod_reviews.sort_values(by="rating", ascending=True)
+    elif sort_p == "Rating cao nhất (5★)":
+        prod_reviews = prod_reviews.sort_values(by="rating", ascending=False)
+    elif sort_p == "Mới nhất" and "created_at" in prod_reviews.columns:
+        prod_reviews = prod_reviews.sort_values(by="created_at", ascending=False)
+
+    display_cols = [c for c in ["created_at", "reviewer_name", "rating", "like_count", "filter_status", "comment_text_raw"] if c in prod_reviews.columns]
+    st.dataframe(prod_reviews[display_cols].head(50), use_container_width=True, hide_index=True)
 
 
 def render_alerts(view: pd.DataFrame, aspects: dict) -> None:
-    st.markdown("### Trung tâm cảnh báo")
+    st.markdown("### Trung tâm cảnh báo & Insight")
     valid = valid_rows(view)
     if valid.empty:
         st.info("Chưa có review hợp lệ để tạo cảnh báo.")
@@ -313,22 +400,38 @@ def render_alerts(view: pd.DataFrame, aspects: dict) -> None:
     if negative_rate >= 15:
         alerts.append(("Cao", f"Tỷ lệ review 1–2 sao đang ở mức {negative_rate:.1f}%."))
     if summary["rating_text_contradictions"] > 0:
-        alerts.append(("Trung bình", f"Có {summary['rating_text_contradictions']:,} review có rating không khớp nội dung."))
+        alerts.append(("Trung bình", f"Có {summary['rating_text_contradictions']:,} review có rating không khớp nội dung (nghịch lý rating)."))
     coverage = summary["aspect_coverage"]
     if coverage:
         top_aspect = max(coverage, key=lambda name: coverage[name]["reviews"])
-        alerts.append(("Theo dõi", f"Aspect được nhắc đến nhiều nhất là {top_aspect}."))
+        alerts.append(("Theo dõi", f"Aspect được nhắc đến nhiều nhất là '{top_aspect}' ({coverage[top_aspect]['reviews']:,} lượt)."))
+
+    # Cảnh báo theo ngành hàng
+    if "category" in valid.columns:
+        cat_neg = valid.groupby("category")["rating"].apply(lambda s: (s <= 2).mean() * 100)
+        if not cat_neg.empty:
+            worst_cat = cat_neg.idxmax()
+            worst_rate = cat_neg.max()
+            if worst_rate >= 8:
+                alerts.append(("Cảnh báo ngành hàng", f"Ngành hàng '{worst_cat}' có tỷ lệ review 1–2 sao cao nhất: {worst_rate:.1f}%."))
+
+    # Cảnh báo review có like cao (high impact)
+    if "like_count" in valid.columns:
+        high_like_neg = valid[(valid["rating"] <= 2) & (valid["like_count"] >= 5)]
+        if not high_like_neg.empty:
+            alerts.append(("Tác động cao", f"Có {len(high_like_neg):,} review tiêu cực có từ 5 lượt thích trở lên; cần xử lý ngay vì ảnh hưởng lớn đến quyết định mua hàng."))
+
     if not alerts:
         st.success("Chưa phát hiện cảnh báo nổi bật trong phạm vi đang xem.")
     for level, message in alerts:
-        (st.error if level == "Cao" else st.warning)(f"**{level}:** {message}")
+        (st.error if level in ["Cao", "Tác động cao"] else st.warning)(f"**{level}:** {message}")
 
     st.markdown("#### Gợi ý hành động")
     if negative_rate >= 15:
-        st.write("Ưu tiên đọc các review rating thấp và kiểm tra sản phẩm hoặc quy trình dịch vụ liên quan.")
+        st.write("• **Chất lượng**: Ưu tiên đọc các review rating thấp và kiểm tra sản phẩm hoặc quy trình dịch vụ liên quan.")
     if coverage:
-        st.write(f"Tập trung phân tích các review đề cập đến aspect **{top_aspect}** để tìm nguyên nhân lặp lại.")
-    st.write("Dùng bộ lọc sản phẩm và nút xuất dữ liệu để giao cho bộ phận phụ trách xử lý.")
+        st.write(f"• **Khía cạnh nóng**: Tập trung phân tích các review đề cập đến aspect **{top_aspect}** để tìm nguyên nhân lặp lại.")
+    st.write("• **Phân bổ nhân lực**: Dùng bộ lọc ngành hàng và sản phẩm kết hợp nút xuất dữ liệu để giao cho bộ phận liên quan giải quyết.")
 
 
 def render_labeling(view: pd.DataFrame, aspects: dict) -> None:
@@ -343,6 +446,19 @@ def render_labeling(view: pd.DataFrame, aspects: dict) -> None:
     review_ids = valid["review_id"].astype(str).tolist()
     review_id = st.selectbox("Chọn review", review_ids)
     row = valid[valid["review_id"].astype(str) == review_id].iloc[0]
+
+    # Context Card
+    prod_name = row.get("product_name", "N/A")
+    cat_name = row.get("category", "N/A")
+    star = row.get("rating", "N/A")
+    user = row.get("reviewer_name", "Ẩn danh")
+    likes = row.get("like_count", 0)
+    st.markdown(
+        f'<div style="background:#fff;border:1px solid #e6e2d9;border-radius:10px;padding:0.75rem 1rem;margin-bottom:0.8rem;font-size:0.9rem;">'
+        f'📦 <b>Sản phẩm:</b> {prod_name} &nbsp;|&nbsp; 📁 <b>Ngành hàng:</b> {cat_name} &nbsp;|&nbsp; ⭐ <b>Rating:</b> {star}★ &nbsp;|&nbsp; 👤 <b>Người viết:</b> {user} ({likes} 👍)'
+        f'</div>',
+        unsafe_allow_html=True
+    )
     st.info(str(row.get("comment_text_raw", "")))
     with st.form("manual_label_form"):
         sentiment = st.selectbox("Nhãn sentiment", ["Tiêu cực", "Trung tính", "Tích cực"])
@@ -351,6 +467,9 @@ def render_labeling(view: pd.DataFrame, aspects: dict) -> None:
     if submitted:
         record = {
             "review_id": review_id,
+            "product_name": prod_name,
+            "category": cat_name,
+            "rating": star,
             "text": str(row.get("comment_text_raw", "")),
             "sentiment_manual": sentiment,
             "aspects_manual": ", ".join(selected_aspects),
@@ -437,7 +556,15 @@ def render_aspect_analysis(view: pd.DataFrame, aspects: dict) -> None:
     text_column = "comment_text_clean" if "comment_text_clean" in valid else "comment_text_raw"
     rows = []
     for _, row in valid.iterrows():
-        rows.extend(build_aspect_sentiment_rows(str(row[text_column]), aspects))
+        meta = {
+            "product_name": row.get("product_name", ""),
+            "category": row.get("category", ""),
+            "rating": row.get("rating", 0),
+            "reviewer_name": row.get("reviewer_name", ""),
+            "like_count": row.get("like_count", 0),
+            "comment_text": row.get(text_column, ""),
+        }
+        rows.extend(build_aspect_sentiment_rows(str(row[text_column]), aspects, meta=meta))
     if not rows:
         st.info("Chưa phát hiện aspect trong phạm vi đang xem.")
         return
@@ -446,29 +573,90 @@ def render_aspect_analysis(view: pd.DataFrame, aspects: dict) -> None:
     st.bar_chart(
         counts.reindex(columns=["Tiêu cực", "Trung tính", "Hỗn hợp", "Tích cực"], fill_value=0)
     )
-    st.dataframe(result, use_container_width=True, hide_index=True)
+
+    st.markdown("#### Chi tiết các nhận xét theo khía cạnh")
+    c_asp, c_sent = st.columns(2)
+    with c_asp:
+        selected_aspects = st.multiselect("Lọc theo Aspect", list(aspects.keys()), default=[])
+    with c_sent:
+        selected_sent = st.multiselect("Lọc theo Sắc thái", ["Tiêu cực", "Trung tính", "Hỗn hợp", "Tích cực"], default=[])
+
+    filtered_res = result.copy()
+    if selected_aspects:
+        filtered_res = filtered_res[filtered_res["aspect"].isin(selected_aspects)]
+    if selected_sent:
+        filtered_res = filtered_res[filtered_res["sentiment"].isin(selected_sent)]
+
+    show_cols = [c for c in ["aspect", "sentiment", "product_name", "category", "rating", "like_count", "matched_keywords", "comment_text"] if c in filtered_res.columns]
+    st.dataframe(filtered_res[show_cols], use_container_width=True, hide_index=True)
 
 
 def render_report(view: pd.DataFrame, aspects: dict) -> None:
-    st.markdown("### Báo cáo seller")
+    st.markdown("### Báo cáo seller tổng hợp")
     if view.empty:
         st.info("Không có dữ liệu để tạo báo cáo.")
         return
     valid = valid_rows(view)
     _, summary = build_report(view, aspects)
+
+    st.markdown("#### 1. Chỉ số tổng thể")
     report_rows = [
-        {"Chỉ số": "Tổng review", "Giá trị": len(view)},
-        {"Chỉ số": "Review hợp lệ", "Giá trị": len(valid)},
-        {"Chỉ số": "Rating trung bình", "Giá trị": round(float(view["rating"].mean()), 2)},
-        {"Chỉ số": "Review 1–2 sao", "Giá trị": int((view["rating"] <= 2).sum())},
-        {"Chỉ số": "Nghịch lý rating", "Giá trị": summary["rating_text_contradictions"]},
+        {"Chỉ số": "Tổng số review thu thập", "Giá trị": len(view)},
+        {"Chỉ số": "Review hợp lệ cho phân tích", "Giá trị": len(valid)},
+        {"Chỉ số": "Review bị lọc (Spam / Trùng lặp)", "Giá trị": len(view) - len(valid)},
+        {"Chỉ số": "Rating trung bình toàn sàn", "Giá trị": f"{round(float(view['rating'].mean()), 2)} / 5"},
+        {"Chỉ số": "Số lượng review tiêu cực (1–2 sao)", "Giá trị": int((view["rating"] <= 2).sum())},
+        {"Chỉ số": "Tỷ lệ review tiêu cực", "Giá trị": f"{(view['rating'] <= 2).mean() * 100:.1f}%"},
+        {"Chỉ số": "Số review nghịch lý rating (text trái ngược sao)", "Giá trị": summary["rating_text_contradictions"]},
     ]
-    report = pd.DataFrame(report_rows)
-    st.dataframe(report, use_container_width=True, hide_index=True)
+    report_df = pd.DataFrame(report_rows)
+    st.dataframe(report_df, use_container_width=True, hide_index=True)
+
+    if "category" in valid.columns:
+        st.markdown("#### 2. Thống kê theo ngành hàng")
+        cat_stats = valid.groupby("category").agg(
+            total_reviews=("review_id", "count"),
+            avg_rating=("rating", "mean"),
+            negative_reviews=("rating", lambda s: int((s <= 2).sum())),
+            negative_rate=("rating", lambda s: f"{(s <= 2).mean() * 100:.1f}%"),
+            total_likes=("like_count", "sum") if "like_count" in valid.columns else ("review_id", "count")
+        ).reset_index().rename(columns={
+            "category": "Ngành hàng",
+            "total_reviews": "Số review",
+            "avg_rating": "Rating TB",
+            "negative_reviews": "Review 1–2★",
+            "negative_rate": "Tỷ lệ tiêu cực",
+            "total_likes": "Tổng like"
+        })
+        cat_stats["Rating TB"] = cat_stats["Rating TB"].round(2)
+        st.dataframe(cat_stats, use_container_width=True, hide_index=True)
+
+    if "platform" in valid.columns:
+        st.markdown("#### 3. Thống kê theo nền tảng")
+        plat_stats = valid.groupby("platform").agg(
+            total_reviews=("review_id", "count"),
+            avg_rating=("rating", "mean"),
+            negative_rate=("rating", lambda s: f"{(s <= 2).mean() * 100:.1f}%")
+        ).reset_index().rename(columns={
+            "platform": "Nền tảng",
+            "total_reviews": "Số review",
+            "avg_rating": "Rating TB",
+            "negative_rate": "Tỷ lệ tiêu cực"
+        })
+        plat_stats["Rating TB"] = plat_stats["Rating TB"].round(2)
+        st.dataframe(plat_stats, use_container_width=True, hide_index=True)
+
+    st.markdown("#### 4. Phủ sóng theo Aspect (Khía cạnh)")
+    coverage_rows = [
+        {"Khía cạnh": asp, "Số review đề cập": data["reviews"], "Tỷ lệ (%)": f"{data['rate_percent']}%"}
+        for asp, data in summary.get("aspect_coverage", {}).items()
+    ]
+    st.dataframe(pd.DataFrame(coverage_rows), use_container_width=True, hide_index=True)
+
     st.download_button(
-        "Xuất báo cáo CSV",
-        report.to_csv(index=False).encode("utf-8-sig"),
-        "seller_report.csv",
+        "Xuất toàn bộ báo cáo CSV",
+        report_df.to_csv(index=False).encode("utf-8-sig"),
+        "seller_summary_report.csv",
         "text/csv",
     )
 
