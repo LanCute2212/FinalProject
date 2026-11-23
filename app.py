@@ -6,8 +6,14 @@ TUYỆT ĐỐI KHÔNG thay đổi logic xử lý dữ liệu, tên hàm nghiệp
 ==============================================================================
 """
 
+import io
 import os
+import queue
 import re
+import subprocess
+import sys
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -959,6 +965,323 @@ def render_research_report(view: pd.DataFrame, aspects: dict) -> None:
 
 
 # ==============================================================================
+# MODULE 5: THU THẬP DỮ LIỆU (CRAWLER UI)
+# ==============================================================================
+
+def _crawl_worker(
+    platform: str,
+    product_id: str,
+    shop_id: str,
+    product_name: str,
+    category: str,
+    max_reviews: int,
+    output_dir: str,
+    run_preprocess: bool,
+    log_queue: queue.Queue,
+) -> None:
+    """Chạy crawler trong luồng riêng, ghi log vào queue."""
+    try:
+        log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] ▶ Khởi động crawler cho sàn {platform.upper()}…")
+
+        if platform == "tiki":
+            from src.crawler.tiki_crawler import TikiCrawler
+            crawler = TikiCrawler()
+            crawler.fetch_product_reviews(
+                shop_id=shop_id,
+                product_id=product_id,
+                product_name=product_name or None,
+                max_reviews=max_reviews,
+                category=category or None,
+            )
+        else:
+            from src.crawler.shopee_crawler import ShopeeCrawler
+            crawler = ShopeeCrawler()
+            crawler.fetch_product_reviews(
+                shop_id=shop_id,
+                product_id=product_id,
+                product_name=product_name or "Sản phẩm Shopee",
+                max_reviews=max_reviews,
+                category=category or "Thiết bị điện tử",
+            )
+
+        saved = crawler.save_raw_data(output_dir=output_dir)
+        n_saved = len(crawler.reviews)
+        log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Thu thập xong {n_saved} đánh giá.")
+
+        if saved:
+            log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 💾 Đã lưu: {saved.get('csv', 'N/A')}")
+
+        if run_preprocess and saved:
+            log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] ⚙️ Đang chạy tiền xử lý dữ liệu…")
+            try:
+                from scripts.run_preprocess import run_full_preprocessing
+                run_full_preprocessing(raw_dir=output_dir)
+                log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Tiền xử lý hoàn tất! Dashboard sẽ được cập nhật khi bạn làm mới.")
+            except Exception as exc:
+                log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Lỗi tiền xử lý: {exc}")
+
+        log_queue.put("__DONE__")
+
+    except Exception as exc:
+        log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Lỗi crawler: {exc}")
+        log_queue.put("__DONE__")
+
+
+def render_crawler() -> None:
+    """Module Thu thập Dữ liệu – giao diện Crawler trong Dashboard."""
+    render_page_header(
+        ":material/cloud_download: Thu thập Dữ liệu",
+        "Cào đánh giá từ Tiki / Shopee, lưu raw data và tự động chạy tiền xử lý để cập nhật Dashboard.",
+    )
+
+    tab_tiki, tab_shopee, tab_history = st.tabs([
+        ":material/store: Crawl Tiki",
+        ":material/shopping_bag: Crawl Shopee",
+        ":material/history: Lịch sử & Tiến độ",
+    ])
+
+    # ── TAB CRAWL TIKI ──────────────────────────────────────────────────────
+    with tab_tiki:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown("#### Cấu hình sản phẩm Tiki")
+        st.caption("Nhập **Product ID** từ URL sản phẩm Tiki (vd: `https://tiki.vn/…-p**185076264**.html`).")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            tiki_pid  = st.text_input("Product ID (*bắt buộc*)", placeholder="185076264", key="tiki_pid")
+            tiki_name = st.text_input("Tên sản phẩm (tuỳ chọn)", placeholder="Tự động lấy từ Tiki", key="tiki_name")
+        with col2:
+            tiki_cat  = st.text_input("Danh mục (tuỳ chọn)", placeholder="Tự động phát hiện", key="tiki_cat")
+            tiki_max  = st.slider("Số đánh giá tối đa cần cào", 10, 500, 100, 10, key="tiki_max")
+
+        tiki_preprocess = st.checkbox("Tự động chạy tiền xử lý sau khi cào xong", value=True, key="tiki_prep")
+        tiki_output     = str(ROOT / "data" / "raw")
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        if st.button(":material/play_arrow: Bắt đầu Crawl Tiki", type="primary", key="btn_tiki"):
+            if not tiki_pid.strip():
+                st.error("Vui lòng nhập **Product ID** của sản phẩm Tiki.")
+            else:
+                # Khởi tạo session state cho Tiki
+                st.session_state["crawl_tiki_logs"]   = []
+                st.session_state["crawl_tiki_done"]   = False
+                st.session_state["crawl_tiki_queue"]  = queue.Queue()
+
+                t = threading.Thread(
+                    target=_crawl_worker,
+                    kwargs=dict(
+                        platform="tiki",
+                        product_id=tiki_pid.strip(),
+                        shop_id="auto",
+                        product_name=tiki_name.strip(),
+                        category=tiki_cat.strip(),
+                        max_reviews=tiki_max,
+                        output_dir=tiki_output,
+                        run_preprocess=tiki_preprocess,
+                        log_queue=st.session_state["crawl_tiki_queue"],
+                    ),
+                    daemon=True,
+                )
+                t.start()
+                st.session_state["crawl_tiki_thread"] = t
+                st.rerun()
+
+        # Hiển thị log live cho Tiki
+        if "crawl_tiki_queue" in st.session_state and not st.session_state.get("crawl_tiki_done", True):
+            q: queue.Queue = st.session_state["crawl_tiki_queue"]
+            while not q.empty():
+                msg = q.get_nowait()
+                if msg == "__DONE__":
+                    st.session_state["crawl_tiki_done"] = True
+                    st.cache_data.clear()
+                else:
+                    st.session_state["crawl_tiki_logs"].append(msg)
+
+            log_text = "\n".join(st.session_state.get("crawl_tiki_logs", []))
+            st.code(log_text or "Đang khởi động…", language="text")
+
+            if not st.session_state.get("crawl_tiki_done", True):
+                time.sleep(1)
+                st.rerun()
+
+        if st.session_state.get("crawl_tiki_done"):
+            log_text = "\n".join(st.session_state.get("crawl_tiki_logs", []))
+            st.code(log_text, language="text")
+            render_alert_card("low", "Crawl hoàn tất", "Nhấn **Làm mới bộ nhớ đệm** trong phần Cài đặt nâng cao để Dashboard hiển thị dữ liệu mới.")
+
+            # Hiển thị preview dữ liệu raw vừa cào
+            raw_csv = Path(tiki_output) / "tiki_raw.csv"
+            if raw_csv.exists():
+                st.markdown("**Xem trước dữ liệu raw (50 dòng mới nhất):**")
+                preview_df = pd.read_csv(raw_csv, encoding="utf-8-sig").tail(50)
+                st.dataframe(preview_df, width="stretch")
+
+                csv_bytes = preview_df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+                st.download_button(
+                    ":material/download: Tải xuống raw CSV",
+                    csv_bytes,
+                    file_name="tiki_raw_preview.csv",
+                    mime="text/csv",
+                )
+
+    # ── TAB CRAWL SHOPEE ─────────────────────────────────────────────────────
+    with tab_shopee:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown("#### Cấu hình sản phẩm Shopee")
+        st.caption("Shopee yêu cầu cả **Shop ID** lẫn **Item ID** (xem trong URL sản phẩm: `…i.**shopId**.**itemId**`).")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            sp_pid   = st.text_input("Item ID (*bắt buộc*)",  placeholder="1234567890", key="sp_pid")
+            sp_sid   = st.text_input("Shop ID (*bắt buộc*)",  placeholder="98765432",   key="sp_sid")
+        with col2:
+            sp_name  = st.text_input("Tên sản phẩm (tuỳ chọn)", placeholder="Sản phẩm Shopee", key="sp_name")
+            sp_cat   = st.text_input("Danh mục (tuỳ chọn)",      placeholder="Thiết bị điện tử", key="sp_cat")
+
+        sp_max = st.slider("Số đánh giá tối đa cần cào", 10, 500, 100, 10, key="sp_max")
+        sp_preprocess = st.checkbox("Tự động chạy tiền xử lý sau khi cào xong", value=True, key="sp_prep")
+        sp_output = str(ROOT / "data" / "raw")
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        render_alert_card(
+            "medium",
+            "Lưu ý về Shopee API",
+            "Shopee thường bật WAF / rate-limit cho các request không có cookie phiên. "
+            "Nếu gặp lỗi 403 / dữ liệu trống, hãy thử lại sau vài phút hoặc giảm số lượng review.",
+        )
+
+        if st.button(":material/play_arrow: Bắt đầu Crawl Shopee", type="primary", key="btn_shopee"):
+            if not sp_pid.strip() or not sp_sid.strip():
+                st.error("Vui lòng nhập đủ **Item ID** và **Shop ID** của sản phẩm Shopee.")
+            else:
+                st.session_state["crawl_sp_logs"]   = []
+                st.session_state["crawl_sp_done"]   = False
+                st.session_state["crawl_sp_queue"]  = queue.Queue()
+
+                t = threading.Thread(
+                    target=_crawl_worker,
+                    kwargs=dict(
+                        platform="shopee",
+                        product_id=sp_pid.strip(),
+                        shop_id=sp_sid.strip(),
+                        product_name=sp_name.strip(),
+                        category=sp_cat.strip(),
+                        max_reviews=sp_max,
+                        output_dir=sp_output,
+                        run_preprocess=sp_preprocess,
+                        log_queue=st.session_state["crawl_sp_queue"],
+                    ),
+                    daemon=True,
+                )
+                t.start()
+                st.session_state["crawl_sp_thread"] = t
+                st.rerun()
+
+        # Hiển thị log live cho Shopee
+        if "crawl_sp_queue" in st.session_state and not st.session_state.get("crawl_sp_done", True):
+            q: queue.Queue = st.session_state["crawl_sp_queue"]
+            while not q.empty():
+                msg = q.get_nowait()
+                if msg == "__DONE__":
+                    st.session_state["crawl_sp_done"] = True
+                    st.cache_data.clear()
+                else:
+                    st.session_state["crawl_sp_logs"].append(msg)
+
+            log_text = "\n".join(st.session_state.get("crawl_sp_logs", []))
+            st.code(log_text or "Đang khởi động…", language="text")
+
+            if not st.session_state.get("crawl_sp_done", True):
+                time.sleep(1)
+                st.rerun()
+
+        if st.session_state.get("crawl_sp_done"):
+            log_text = "\n".join(st.session_state.get("crawl_sp_logs", []))
+            st.code(log_text, language="text")
+            render_alert_card("low", "Crawl hoàn tất", "Nhấn **Làm mới bộ nhớ đệm** trong phần Cài đặt nâng cao để Dashboard hiển thị dữ liệu mới.")
+
+            raw_csv = Path(sp_output) / "shopee_raw.csv"
+            if raw_csv.exists():
+                st.markdown("**Xem trước dữ liệu raw (50 dòng mới nhất):**")
+                preview_df = pd.read_csv(raw_csv, encoding="utf-8-sig").tail(50)
+                st.dataframe(preview_df, width="stretch")
+
+                csv_bytes = preview_df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+                st.download_button(
+                    ":material/download: Tải xuống raw CSV",
+                    csv_bytes,
+                    file_name="shopee_raw_preview.csv",
+                    mime="text/csv",
+                )
+
+    # ── TAB LỊCH SỬ & TIẾN ĐỘ ────────────────────────────────────────────────
+    with tab_history:
+        st.markdown("#### Dữ liệu raw hiện tại trong hệ thống")
+        raw_dir = ROOT / "data" / "raw"
+        raw_files = sorted(raw_dir.glob("*.csv")) if raw_dir.exists() else []
+
+        if not raw_files:
+            render_empty_state("Chưa có dữ liệu raw", "Hãy chạy Crawl Tiki hoặc Crawl Shopee để bắt đầu thu thập.", ":material/inbox:")
+        else:
+            overview_rows = []
+            for f in raw_files:
+                try:
+                    tmp = pd.read_csv(f, encoding="utf-8-sig")
+                    overview_rows.append({
+                        "Tệp"               : f.name,
+                        "Số đánh giá"       : len(tmp),
+                        "Sàn"               : tmp["platform"].iloc[0] if "platform" in tmp.columns else "—",
+                        "Lần cập nhật cuối" : datetime.fromtimestamp(f.stat().st_mtime).strftime("%d/%m/%Y %H:%M"),
+                        "Kích thước"        : f"{f.stat().st_size / 1024:.1f} KB",
+                    })
+                except Exception:
+                    pass
+
+            if overview_rows:
+                st.dataframe(pd.DataFrame(overview_rows), width="stretch")
+
+            # Nút tải từng file
+            st.markdown("**Tải xuống file raw:**")
+            dl_cols = st.columns(min(len(raw_files), 4))
+            for idx, rf in enumerate(raw_files):
+                with dl_cols[idx % 4]:
+                    raw_bytes = rf.read_bytes()
+                    st.download_button(
+                        f":material/download: {rf.name}",
+                        raw_bytes,
+                        file_name=rf.name,
+                        mime="text/csv",
+                        key=f"dl_raw_{rf.name}",
+                    )
+
+        st.divider()
+        st.markdown("#### Dữ liệu đã xử lý (Processed)")
+        proc_csv = ROOT / "data" / "processed" / "reviews_processed.csv"
+        if proc_csv.exists():
+            proc_df = pd.read_csv(proc_csv, encoding="utf-8-sig")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                render_kpi("Tổng đánh giá đã xử lý", f"{len(proc_df):,}", ":material/check_circle:", "#10b981")
+            with col2:
+                plats = proc_df["platform"].nunique() if "platform" in proc_df.columns else 0
+                render_kpi("Số sàn TMĐT", str(plats), ":material/storefront:", "#2563eb")
+            with col3:
+                last_mod = datetime.fromtimestamp(proc_csv.stat().st_mtime).strftime("%d/%m/%Y %H:%M")
+                render_kpi("Cập nhật lần cuối", last_mod, ":material/update:", "#64748b")
+
+            st.markdown("**50 dòng cuối cùng của tập processed:**")
+            st.dataframe(proc_df.tail(50), width="stretch")
+        else:
+            render_empty_state(
+                "Chưa có dữ liệu đã xử lý",
+                "Sau khi crawl, hãy bật tùy chọn **Tự động chạy tiền xử lý** hoặc chạy `python scripts/run_preprocess.py` thủ công.",
+                ":material/hourglass_empty:",
+            )
+
+
+# ==============================================================================
 # HÀM TẠO 3-4 THẺ INSIGHT ĐỘNG CHO EXECUTIVE SUMMARY (KHÔNG HARDCODE)
 # ==============================================================================
 
@@ -1074,6 +1397,7 @@ def main() -> None:
             ":material/category: Phân tích Khía cạnh Sản phẩm (ABSA)",
             ":material/warning: Cảnh báo Rủi ro & Khách hàng",
             ":material/science: Phòng Nghiên cứu & Mô hình AI",
+            ":material/cloud_download: Thu thập Dữ liệu (Crawler)",
         ],
         label_visibility="collapsed",
     )
@@ -1183,6 +1507,22 @@ def main() -> None:
             render_risk_alerts(view, aspects)
         with tab3:
             render_risk_explorer(view)
+
+    elif "Nghiên cứu" in nav_page:
+        tab1, tab2, tab3 = st.tabs([
+            ":material/psychology: Huấn luyện & Đánh giá Mô hình",
+            ":material/edit_note: Công cụ Gán nhãn Thủ công",
+            ":material/description: Báo cáo Khoa học Tổng hợp",
+        ])
+        with tab1:
+            render_research_lab(view)
+        with tab2:
+            render_research_labeling(view, aspects)
+        with tab3:
+            render_research_report(view, aspects)
+
+    elif "Crawler" in nav_page:
+        render_crawler()
 
     else:
         tab1, tab2, tab3 = st.tabs([
