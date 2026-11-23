@@ -20,11 +20,17 @@ def generate_sample_dataset(num_records: int = 500, output_dir: str = "data/raw"
 
     shop_id = "shop_tech_888"
     products = [
-        {"product_id": "SP01", "product_name": "Tai nghe Bluetooth True Wireless Pro Bass"},
-        {"product_id": "SP02", "product_name": "Chuột Gaming Không Dây Silent Click RGB"},
-        {"product_id": "SP03", "product_name": "Bàn Phím Cơ Không Dây 3 Chế Độ Kết Nối"},
-        {"product_id": "SP04", "product_name": "Củ Sạc Nhanh GaN 65W 3 Cổng Tiện Lợi"},
-        {"product_id": "SP05", "product_name": "Cáp Sạc Nhanh Bọc Dù Chống Đứt 100W"}
+        {"product_id": "SP01", "product_name": "Tai nghe Bluetooth True Wireless Pro Bass", "category": "Thiết bị âm thanh"},
+        {"product_id": "SP02", "product_name": "Chuột Gaming Không Dây Silent Click RGB", "category": "Phụ kiện máy tính"},
+        {"product_id": "SP03", "product_name": "Bàn Phím Cơ Không Dây 3 Chế Độ Kết Nối", "category": "Phụ kiện máy tính"},
+        {"product_id": "SP04", "product_name": "Củ Sạc Nhanh GaN 65W 3 Cổng Tiện Lợi", "category": "Củ sạc & Cáp sạc"},
+        {"product_id": "SP05", "product_name": "Cáp Sạc Nhanh Bọc Dù Chống Đứt 100W", "category": "Củ sạc & Cáp sạc"}
+    ]
+
+    sample_reviewers = [
+        "Nguyễn Văn An", "Trần Thị Mai", "Lê Hoàng Long", "Phạm Đức Mạnh",
+        "Hoàng Minh Tuấn", "Vũ Thùy Linh", "Đặng Quang Huy", "Bùi Thu Trang",
+        "Đỗ Quốc Bảo", "Hồ Ngọc Khánh", "Ngô Thanh Hằng", "Dương Gia Bảo"
     ]
 
     # Các khối câu để ghép đa dạng
@@ -139,14 +145,28 @@ def generate_sample_dataset(num_records: int = 500, output_dir: str = "data/raw"
                 text = random.choice(spam_samples)
                 rating = 5
 
+        # Phân bố lượt like: 70% 0 like, 20% 1-5 like, 10% 6-25 like
+        like_dice = random.random()
+        if like_dice < 0.70:
+            likes = 0
+        elif like_dice < 0.90:
+            likes = random.randint(1, 5)
+        else:
+            likes = random.randint(6, 25)
+
+        reviewer = random.choice(sample_reviewers)
+
         records.append({
             "review_id": review_id,
             "shop_id": shop_id,
             "product_id": prod["product_id"],
             "product_name": prod["product_name"],
+            "category": prod["category"],
             "rating": rating,
             "comment_text": text,
             "created_at": created_at_str,
+            "reviewer_name": reviewer,
+            "like_count": likes,
             "platform": "mock_shopee_crawler"
         })
 

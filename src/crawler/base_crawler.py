@@ -17,6 +17,7 @@ class BaseCrawler(ABC):
     - BR08: Review thuộc phạm vi Seller.
     - BR10: Rating nằm trong thang 1 - 5.
     - BR11: Bảo toàn review gốc không thay đổi.
+    - Chuẩn hóa thông tin: Tên sản phẩm, Danh mục (Category), Tên người đánh giá (Reviewer), Lượt thích (Like count).
     """
 
     def __init__(self, platform_name: str):
@@ -24,7 +25,13 @@ class BaseCrawler(ABC):
         self.reviews: List[Dict[str, Any]] = []
 
     @abstractmethod
-    def fetch_product_reviews(self, shop_id: str, product_id: str, max_reviews: int = 100) -> List[Dict[str, Any]]:
+    def fetch_product_reviews(
+        self,
+        shop_id: str,
+        product_id: str,
+        max_reviews: int = 100,
+        category: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """Hàm trừu tượng cần được override bởi từng sàn (Shopee, Tiki...)."""
         pass
 
@@ -37,6 +44,9 @@ class BaseCrawler(ABC):
         rating: int,
         comment_text: str,
         created_at: str,
+        category: str = "Chưa phân loại",
+        reviewer_name: str = "Khách hàng",
+        like_count: int = 0,
         raw_payload: Optional[Dict[str, Any]] = None
     ) -> bool:
         """Kiểm tra và chuẩn hóa bản ghi review trước khi lưu trữ."""
@@ -56,14 +66,23 @@ class BaseCrawler(ABC):
         else:
             comment_text = str(comment_text)
 
+        # Chuẩn hóa số lượt like
+        try:
+            like_count_val = int(like_count) if like_count is not None else 0
+        except (ValueError, TypeError):
+            like_count_val = 0
+
         record = {
             "review_id": str(review_id),
             "shop_id": str(shop_id),
             "product_id": str(product_id),
             "product_name": str(product_name).strip(),
+            "category": str(category).strip() if category else "Chưa phân loại",
             "rating": rating,
             "comment_text": comment_text,
             "created_at": str(created_at),
+            "reviewer_name": str(reviewer_name).strip() if reviewer_name else "Khách hàng",
+            "like_count": max(0, like_count_val),
             "platform": self.platform_name,
             "raw_payload": json.dumps(raw_payload, ensure_ascii=False) if raw_payload else "{}"
         }
@@ -94,6 +113,12 @@ class BaseCrawler(ABC):
             try:
                 existing_df = pd.read_csv(csv_path)
                 logger.info(f"Tìm thấy file cũ '{csv_path}' với {len(existing_df)} review. Tiến hành gộp và loại bỏ trùng lặp...")
+
+                # Bổ sung các cột mới nếu file cũ chưa có
+                for col, default_val in [("category", "Chưa phân loại"), ("reviewer_name", "Khách hàng"), ("like_count", 0)]:
+                    if col not in existing_df.columns:
+                        existing_df[col] = default_val
+
                 merged_df = pd.concat([existing_df, new_df], ignore_index=True)
                 if "review_id" in merged_df.columns:
                     merged_df["review_id"] = merged_df["review_id"].astype(str)
@@ -108,6 +133,15 @@ class BaseCrawler(ABC):
                 final_df = new_df
         else:
             final_df = new_df
+
+        # Sắp xếp các cột theo thứ tự chuẩn hóa
+        desired_columns = [
+            "review_id", "shop_id", "product_id", "product_name", "category",
+            "rating", "comment_text", "created_at", "reviewer_name", "like_count",
+            "platform", "raw_payload"
+        ]
+        cols_to_use = [c for c in desired_columns if c in final_df.columns] + [c for c in final_df.columns if c not in desired_columns]
+        final_df = final_df[cols_to_use]
 
         # Lưu CSV
         final_df.to_csv(csv_path, index=False, encoding="utf-8-sig")

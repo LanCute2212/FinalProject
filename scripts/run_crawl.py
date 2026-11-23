@@ -17,6 +17,7 @@ def main():
     parser.add_argument("--product_id", type=str, required=True, help="Mã sản phẩm (product_id hoặc item_id)")
     parser.add_argument("--shop_id", type=str, default="auto", help="Mã cửa hàng (shop_id), mặc định auto")
     parser.add_argument("--product_name", type=str, default=None, help="Tên sản phẩm (tự động lấy nếu bỏ trống)")
+    parser.add_argument("--category", type=str, default=None, help="Danh mục sản phẩm (tự động phát hiện nếu bỏ trống)")
     parser.add_argument("--max_reviews", type=int, default=100, help="Số lượng review tối đa cần cào (nhập 0 hoặc dùng --all để cào hết)")
     parser.add_argument("--all", action="store_true", help="Cào TOÀN BỘ review của sản phẩm không giới hạn số lượng")
     parser.add_argument("--output_dir", type=str, default="data/raw", help="Thư mục lưu trữ raw data")
@@ -34,7 +35,8 @@ def main():
             shop_id=args.shop_id,
             product_id=args.product_id,
             product_name=args.product_name,
-            max_reviews=max_reviews
+            max_reviews=max_reviews,
+            category=args.category
         )
     elif args.platform == "shopee":
         if args.shop_id == "auto":
@@ -44,8 +46,9 @@ def main():
         crawler.fetch_product_reviews(
             shop_id=args.shop_id,
             product_id=args.product_id,
-            product_name=args.product_name,
-            max_reviews=max_reviews
+            product_name=args.product_name or "Sản phẩm Shopee",
+            max_reviews=max_reviews,
+            category=args.category or "Thiết bị điện tử"
         )
 
     # Lưu và gom dữ liệu vào 1 file duy nhất cho nền tảng đó

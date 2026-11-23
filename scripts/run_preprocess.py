@@ -48,6 +48,45 @@ def load_all_raw_data(raw_dir: str = "data/raw") -> pd.DataFrame:
         if dedup_count > 0:
             logger.info(f"Đã loại bỏ {dedup_count} bản ghi trùng lặp giữa các bộ.")
 
+    # Tự động phục hồi comment_text từ raw_payload nếu cột comment_text bị rỗng/NaN
+    if "raw_payload" in combined_df.columns and "comment_text" in combined_df.columns:
+        import json
+        def recover_text(row):
+            txt = row.get("comment_text")
+            if pd.isna(txt) or str(txt).strip() == "" or str(txt).strip().lower() == "nan":
+                payload = row.get("raw_payload")
+                if pd.notna(payload):
+                    try:
+                        data = json.loads(payload) if isinstance(payload, str) else payload
+                        if isinstance(data, dict):
+                            content = data.get("content")
+                            if content and str(content).strip():
+                                return str(content).strip()
+                    except Exception:
+                        pass
+            return txt
+        recovered = combined_df.apply(recover_text, axis=1)
+        recovered_count = (combined_df["comment_text"].isna() & recovered.notna()).sum()
+        if recovered_count > 0:
+            logger.info(f"Đã tự động trích xuất nội dung từ raw_payload cho {recovered_count} review có comment_text bị trống.")
+        combined_df["comment_text"] = recovered
+
+    # Đảm bảo các cột metadata mới luôn đầy đủ và có kiểu dữ liệu chuẩn
+    if "category" not in combined_df.columns:
+        combined_df["category"] = "Chưa phân loại"
+    else:
+        combined_df["category"] = combined_df["category"].fillna("Chưa phân loại")
+
+    if "reviewer_name" not in combined_df.columns:
+        combined_df["reviewer_name"] = "Khách hàng"
+    else:
+        combined_df["reviewer_name"] = combined_df["reviewer_name"].fillna("Khách hàng")
+
+    if "like_count" not in combined_df.columns:
+        combined_df["like_count"] = 0
+    else:
+        combined_df["like_count"] = pd.to_numeric(combined_df["like_count"], errors="coerce").fillna(0).astype(int)
+
     logger.info(f"Tổng hợp toàn bộ dữ liệu raw: {len(combined_df)} bản ghi.")
     return combined_df
 
@@ -73,6 +112,14 @@ def display_statistics(df: pd.DataFrame):
         p_counts = df["platform"].value_counts()
         for p_name, p_cnt in p_counts.items():
             print(f"   • {p_name:<20}: {p_cnt:>5} reviews ({p_cnt/total*100:>5.1f}%)")
+        print("-" * 70)
+
+    # Phân bố danh mục sản phẩm
+    if "category" in df.columns:
+        print(" Phân bố theo Danh mục sản phẩm (Category breakdown):")
+        c_counts = df["category"].value_counts()
+        for c_name, c_cnt in c_counts.items():
+            print(f"   • {c_name:<30}: {c_cnt:>5} reviews ({c_cnt/total*100:>5.1f}%)")
         print("-" * 70)
 
     # Phân bố rating của tập hợp lệ

@@ -228,8 +228,8 @@ def render_attention(view: pd.DataFrame, aspects: dict) -> None:
     )
     st.metric("Số review cần kiểm tra", f"{len(attention):,}")
     columns = [
-        "loai_tin_hieu", "created_at", "platform", "product_name",
-        "rating", "comment_text_raw", "rating_text_contradiction",
+        "loai_tin_hieu", "created_at", "platform", "category", "product_name",
+        "reviewer_name", "rating", "like_count", "comment_text_raw", "rating_text_contradiction",
     ]
     st.dataframe(
         attention[[column for column in columns if column in attention.columns]],
@@ -410,9 +410,21 @@ def render_model_lab(view: pd.DataFrame) -> None:
         st.markdown("#### Confusion Matrix")
         st.dataframe(matrix, use_container_width=True)
         st.json({label: report[label] for label in labels if label in report})
+        
+        # Lưu mô hình bền vững ra đĩa
+        os.makedirs("models", exist_ok=True)
+        import joblib
+        joblib.dump(model, "models/sentiment_model.joblib")
         st.session_state["trained_model"] = model
+        st.success("Mô hình đã được huấn luyện và lưu an toàn tại `models/sentiment_model.joblib`. Bạn có thể thử nghiệm ngay tại trang Mô phỏng!")
+    elif os.path.exists("models/sentiment_model.joblib") and "trained_model" not in st.session_state:
+        try:
+            import joblib
+            st.session_state["trained_model"] = joblib.load("models/sentiment_model.joblib")
+        except Exception:
+            pass
     if "trained_model" in st.session_state:
-        st.success("Mô hình đang có trong phiên làm việc. Có thể dùng để thử dự đoán ở trang Mô phỏng.")
+        st.info("Mô hình đã sẵn sàng. Bạn có thể sang trang 'Mô phỏng bình luận' để dự đoán câu review bất kỳ.")
 
 
 def render_aspect_analysis(view: pd.DataFrame, aspects: dict) -> None:
@@ -463,7 +475,16 @@ def render_report(view: pd.DataFrame, aspects: dict) -> None:
 
 def render_review_explorer(view: pd.DataFrame) -> None:
     st.markdown("### Tra cứu review")
-    search = st.text_input("Tìm trong nội dung", placeholder="Ví dụ: giao hàng, chất lượng, đóng gói...")
+    col_search, col_sort = st.columns([3, 1])
+    with col_search:
+        search = st.text_input("Tìm trong nội dung", placeholder="Ví dụ: giao hàng, chất lượng, đóng gói...", label_visibility="collapsed")
+    with col_sort:
+        sort_by = st.selectbox(
+            "Sắp xếp theo",
+            ["Mới nhất", "Lượt thích nhiều nhất (Helpful)", "Rating thấp nhất (1★)", "Rating cao nhất (5★)"],
+            label_visibility="collapsed"
+        )
+
     status_options = sorted(view["filter_status"].dropna().astype(str).unique()) if "filter_status" in view else []
     statuses = st.multiselect("Trạng thái", status_options, default=status_options)
     table = view.copy()
@@ -471,7 +492,21 @@ def render_review_explorer(view: pd.DataFrame) -> None:
         table = table[table["comment_text_raw"].astype(str).str.contains(search, case=False, na=False)]
     if statuses and "filter_status" in table:
         table = table[table["filter_status"].astype(str).isin(statuses)]
-    columns = ["created_at", "platform", "product_name", "rating", "filter_status", "comment_text_raw", "comment_text_clean"]
+
+    if sort_by == "Lượt thích nhiều nhất (Helpful)" and "like_count" in table:
+        table = table.sort_values(by="like_count", ascending=False)
+    elif sort_by == "Rating thấp nhất (1★)":
+        table = table.sort_values(by="rating", ascending=True)
+    elif sort_by == "Rating cao nhất (5★)":
+        table = table.sort_values(by="rating", ascending=False)
+    elif sort_by == "Mới nhất" and "created_at" in table:
+        table = table.sort_values(by="created_at", ascending=False)
+
+    columns = [
+        "created_at", "platform", "category", "product_name",
+        "reviewer_name", "rating", "like_count", "filter_status",
+        "comment_text_raw", "comment_text_clean"
+    ]
     st.caption(f"Hiển thị {len(table):,} review")
     st.dataframe(table[[column for column in columns if column in table.columns]], use_container_width=True, hide_index=True)
     if not table.empty:
@@ -507,15 +542,47 @@ def render_simulator(aspects: dict) -> None:
         feature_pipeline = FeatureEngineeringPipeline(str(ASPECT_DATA))
         labels, _ = feature_pipeline.build_labels(sample)
         labels = labels.iloc[0]
+
+        model = st.session_state.get("trained_model")
+        if model is None and os.path.exists("models/sentiment_model.joblib"):
+            try:
+                import joblib
+                model = joblib.load("models/sentiment_model.joblib")
+                st.session_state["trained_model"] = model
+            except Exception:
+                model = None
+
+        ai_sentiment = None
+        if model is not None:
+            try:
+                seg_text = processed.get("comment_text_segmented") or processed.get("comment_text_clean") or text
+                pred = model.predict([seg_text])[0]
+                vn_map = {"negative": "Tiêu cực", "neutral": "Trung tính", "positive": "Tích cực"}
+                ai_sentiment = vn_map.get(pred, str(pred))
+            except Exception:
+                ai_sentiment = None
+
         st.markdown("#### Kết quả mô phỏng")
-        cols = st.columns(3)
-        with cols[0]:
-            metric("Sentiment baseline", str(labels["sentiment_name"]), f"theo rating {rating} sao")
-        with cols[1]:
-            metric("Trạng thái", "SPAM" if processed["is_spam"] else "VALID", processed["spam_reason"])
-        with cols[2]:
-            matched = sum(int(labels[f"aspect_{name}"]) for name in aspects)
-            metric("Aspect phát hiện", str(matched), "theo lexicon")
+        if ai_sentiment:
+            cols = st.columns(4)
+            with cols[0]:
+                metric("Sentiment baseline", str(labels["sentiment_name"]), f"theo rating {rating} sao")
+            with cols[1]:
+                metric("Sentiment AI", ai_sentiment, "mô hình ML đã train")
+            with cols[2]:
+                metric("Trạng thái", "SPAM" if processed["is_spam"] else "VALID", processed["spam_reason"])
+            with cols[3]:
+                matched = sum(int(labels[f"aspect_{name}"]) for name in aspects)
+                metric("Aspect phát hiện", str(matched), "theo lexicon")
+        else:
+            cols = st.columns(3)
+            with cols[0]:
+                metric("Sentiment baseline", str(labels["sentiment_name"]), f"theo rating {rating} sao")
+            with cols[1]:
+                metric("Trạng thái", "SPAM" if processed["is_spam"] else "VALID", processed["spam_reason"])
+            with cols[2]:
+                matched = sum(int(labels[f"aspect_{name}"]) for name in aspects)
+                metric("Aspect phát hiện", str(matched), "theo lexicon")
         aspect_result = pd.DataFrame(
             [{
                 "aspect": name,
@@ -552,11 +619,19 @@ def main() -> None:
     st.sidebar.markdown("### Bộ lọc dữ liệu")
     platforms = sorted(df["platform"].dropna().astype(str).unique())
     selected_platforms = st.sidebar.multiselect("Nền tảng", platforms, default=platforms)
-    products = sorted(df["product_name"].dropna().astype(str).unique())
+    
+    categories = sorted([str(c) for c in df["category"].dropna().unique() if str(c).strip()]) if "category" in df.columns else []
+    selected_categories = st.sidebar.multiselect("Ngành hàng", categories, default=categories) if categories else []
+
+    cat_df = df[df["category"].astype(str).isin(selected_categories)] if (categories and selected_categories) else df
+    products = sorted(cat_df["product_name"].dropna().astype(str).unique()) if "product_name" in cat_df.columns else []
     selected_products = st.sidebar.multiselect("Sản phẩm", products, default=[])
     ratings = st.sidebar.slider("Khoảng rating", 1, 5, (1, 5))
     valid_only = st.sidebar.checkbox("Chỉ review hợp lệ", value=False)
+    
     view = df[df["platform"].astype(str).isin(selected_platforms) & df["rating"].between(*ratings)]
+    if categories:
+        view = view[view["category"].astype(str).isin(selected_categories)]
     if selected_products:
         view = view[view["product_name"].astype(str).isin(selected_products)]
     if valid_only and "is_valid_for_analysis" in view:
