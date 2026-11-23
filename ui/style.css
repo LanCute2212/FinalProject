@@ -1,0 +1,430 @@
+/* ==========================================================================
+   CUSTOMER VOICE AI - SAAS DESIGN SYSTEM
+   Tham chiếu: Stripe Dashboard, Linear, Shopify Admin, Metabase
+   ========================================================================== */
+
+:root {
+  /* 1. Bảng màu chủ đạo (Brand Primary) */
+  --color-primary: #2563eb;
+  --color-primary-hover: #1d4ed8;
+  --color-primary-light: #eff6ff;
+  --color-primary-border: #bfdbfe;
+
+  /* 2. Bảng màu trung tính (Slate Neutrals) */
+  --color-bg-app: #f8fafc;
+  --color-bg-surface: #ffffff;
+  --color-bg-subtle: #f1f5f9;
+  --color-bg-muted: #e2e8f0;
+  
+  --color-text-main: #0f172a;
+  --color-text-body: #334155;
+  --color-text-muted: #64748b;
+  --color-text-subtle: #94a3b8;
+  --color-text-inverse: #ffffff;
+
+  --color-border-subtle: #f1f5f9;
+  --color-border-default: #e2e8f0;
+  --color-border-strong: #cbd5e1;
+
+  /* 3. Màu ngữ nghĩa cho Cảm xúc (Semantic Sentiment Colors) */
+  --sentiment-pos-bg: #ecfdf5;
+  --sentiment-pos-text: #065f46;
+  --sentiment-pos-border: #a7f3d0;
+  --sentiment-pos-solid: #10b981;
+
+  --sentiment-neu-bg: #f1f5f9;
+  --sentiment-neu-text: #334155;
+  --sentiment-neu-border: #cbd5e1;
+  --sentiment-neu-solid: #64748b;
+
+  --sentiment-mix-bg: #fffbeb;
+  --sentiment-mix-text: #92400e;
+  --sentiment-mix-border: #fde68a;
+  --sentiment-mix-solid: #f59e0b;
+
+  --sentiment-neg-bg: #fef2f2;
+  --sentiment-neg-text: #991b1b;
+  --sentiment-neg-border: #fecaca;
+  --sentiment-neg-solid: #ef4444;
+
+  /* 4. Mức độ Cảnh báo (Alert Severity) */
+  --alert-high-bg: #fef2f2;
+  --alert-high-text: #991b1b;
+  --alert-high-border: #f87171;
+  --alert-high-accent: #dc2626;
+
+  --alert-med-bg: #fffbeb;
+  --alert-med-text: #92400e;
+  --alert-med-border: #fcd34d;
+  --alert-med-accent: #d97706;
+
+  --alert-low-bg: #eff6ff;
+  --alert-low-text: #1e40af;
+  --alert-low-border: #93c5fd;
+  --alert-low-accent: #2563eb;
+
+  /* 5. Khoảng cách (Spacing) */
+  --space-xs: 0.25rem;
+  --space-sm: 0.5rem;
+  --space-md: 0.75rem;
+  --space-lg: 1rem;
+  --space-xl: 1.5rem;
+  --space-2xl: 2rem;
+
+  /* 6. Bo góc (Border Radius) */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-full: 9999px;
+
+  /* 7. Bóng đổ (Elevation / Shadows) */
+  --shadow-subtle: 0 1px 2px 0 rgba(15, 23, 42, 0.04);
+  --shadow-card: 0 1px 3px 0 rgba(15, 23, 42, 0.06), 0 1px 2px -1px rgba(15, 23, 42, 0.06);
+  --shadow-card-hover: 0 4px 6px -1px rgba(15, 23, 42, 0.08), 0 2px 4px -2px rgba(15, 23, 42, 0.06);
+}
+
+/* Base App Layout */
+html, body, [class*="css"] {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  color: var(--color-text-body);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.main .block-container {
+  padding-top: 1.5rem;
+  padding-bottom: 3.5rem;
+  max-width: 1440px;
+}
+
+/* Page Header */
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding-bottom: var(--space-lg);
+  margin-bottom: var(--space-xl);
+  border-bottom: 1px solid var(--color-border-default);
+}
+
+.page-header-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--color-text-main);
+  letter-spacing: -0.025em;
+  margin: 0 0 var(--space-xs) 0;
+}
+
+.page-header-desc {
+  font-size: 0.875rem;
+  color: var(--color-text-muted);
+  margin: 0;
+}
+
+.page-header-actions {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: center;
+}
+
+/* KPI Card */
+.kpi-card {
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-lg);
+  padding: var(--space-lg) var(--space-xl);
+  box-shadow: var(--shadow-card);
+  transition: box-shadow 0.15s ease, border-color 0.15s ease;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.kpi-card:hover {
+  box-shadow: var(--shadow-card-hover);
+  border-color: var(--color-border-strong);
+}
+
+.kpi-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--space-xs);
+}
+
+.kpi-label {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.kpi-icon {
+  color: var(--color-primary);
+  font-size: 1.1rem;
+}
+
+.kpi-value {
+  font-size: 1.875rem;
+  font-weight: 700;
+  color: var(--color-text-main);
+  line-height: 1.15;
+  letter-spacing: -0.03em;
+  margin: var(--space-xs) 0;
+}
+
+.kpi-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-size: 0.775rem;
+  color: var(--color-text-muted);
+}
+
+.kpi-delta-good {
+  color: var(--sentiment-pos-text);
+  background: var(--sentiment-pos-bg);
+  padding: 1px 6px;
+  border-radius: var(--radius-xs);
+  font-weight: 600;
+}
+
+.kpi-delta-bad {
+  color: var(--sentiment-neg-text);
+  background: var(--sentiment-neg-bg);
+  padding: 1px 6px;
+  border-radius: var(--radius-xs);
+  font-weight: 600;
+}
+
+.kpi-delta-neutral {
+  color: var(--sentiment-neu-text);
+  background: var(--sentiment-neu-bg);
+  padding: 1px 6px;
+  border-radius: var(--radius-xs);
+  font-weight: 600;
+}
+
+/* Executive Summary Card Grid */
+.insight-card {
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-lg);
+  padding: var(--space-lg);
+  box-shadow: var(--shadow-card);
+  position: relative;
+  overflow: hidden;
+  height: 100%;
+}
+
+.insight-card-primary {
+  border-top: 3px solid var(--color-primary);
+}
+
+.insight-card-warning {
+  border-top: 3px solid var(--sentiment-mix-solid);
+}
+
+.insight-card-danger {
+  border-top: 3px solid var(--sentiment-neg-solid);
+}
+
+.insight-card-success {
+  border-top: 3px solid var(--sentiment-pos-solid);
+}
+
+.insight-label {
+  font-size: 0.775rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  letter-spacing: 0.05em;
+  margin-bottom: var(--space-xs);
+}
+
+.insight-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--color-text-main);
+  margin-bottom: var(--space-xs);
+}
+
+.insight-desc {
+  font-size: 0.8125rem;
+  color: var(--color-text-body);
+  line-height: 1.45;
+  margin: 0;
+}
+
+/* Chart Container Card */
+.chart-card {
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-lg);
+  padding: var(--space-lg) var(--space-lg) var(--space-md) var(--space-lg);
+  box-shadow: var(--shadow-card);
+  margin-bottom: var(--space-xl);
+}
+
+.chart-header {
+  margin-bottom: var(--space-md);
+}
+
+.chart-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--color-text-main);
+  margin: 0 0 2px 0;
+}
+
+.chart-subtitle {
+  font-size: 0.8125rem;
+  color: var(--color-text-muted);
+  margin: 0;
+}
+
+/* Semantic Badges */
+.badge-pos {
+  display: inline-block;
+  background: var(--sentiment-pos-bg);
+  color: var(--sentiment-pos-text);
+  border: 1px solid var(--sentiment-pos-border);
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.badge-neu {
+  display: inline-block;
+  background: var(--sentiment-neu-bg);
+  color: var(--sentiment-neu-text);
+  border: 1px solid var(--sentiment-neu-border);
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.badge-mix {
+  display: inline-block;
+  background: var(--sentiment-mix-bg);
+  color: var(--sentiment-mix-text);
+  border: 1px solid var(--sentiment-mix-border);
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.badge-neg {
+  display: inline-block;
+  background: var(--sentiment-neg-bg);
+  color: var(--sentiment-neg-text);
+  border: 1px solid var(--sentiment-neg-border);
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+/* Custom Alert Card */
+.alert-card {
+  border-radius: var(--radius-md);
+  padding: var(--space-md) var(--space-lg);
+  margin-bottom: var(--space-md);
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-md);
+}
+
+.alert-card-high {
+  background: var(--alert-high-bg);
+  border: 1px solid var(--alert-high-border);
+  border-left: 4px solid var(--alert-high-accent);
+  color: var(--alert-high-text);
+}
+
+.alert-card-med {
+  background: var(--alert-med-bg);
+  border: 1px solid var(--alert-med-border);
+  border-left: 4px solid var(--alert-med-accent);
+  color: var(--alert-med-text);
+}
+
+.alert-card-low {
+  background: var(--alert-low-bg);
+  border: 1px solid var(--alert-low-border);
+  border-left: 4px solid var(--alert-low-accent);
+  color: var(--alert-low-text);
+}
+
+.alert-title {
+  font-weight: 700;
+  font-size: 0.875rem;
+  margin-bottom: 2px;
+}
+
+.alert-message {
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  margin: 0;
+}
+
+/* Empty State Component */
+.empty-state {
+  text-align: center;
+  padding: 3rem 1.5rem;
+  background: var(--color-bg-surface);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  margin: var(--space-xl) 0;
+}
+
+.empty-state-icon {
+  font-size: 2.25rem;
+  color: var(--color-text-subtle);
+  margin-bottom: var(--space-sm);
+}
+
+.empty-state-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--color-text-main);
+  margin-bottom: var(--space-xs);
+}
+
+.empty-state-desc {
+  font-size: 0.875rem;
+  color: var(--color-text-muted);
+  max-width: 420px;
+  margin: 0 auto var(--space-md) auto;
+}
+
+/* Context Badge Info */
+.info-strip {
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  padding: var(--space-sm) var(--space-lg);
+  margin-bottom: var(--space-lg);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-md);
+  align-items: center;
+  font-size: 0.84rem;
+  color: var(--color-text-body);
+}
+
+/* Sidebar Footer */
+.sidebar-footer {
+  margin-top: var(--space-2xl);
+  padding-top: var(--space-lg);
+  border-top: 1px solid var(--color-border-default);
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  line-height: 1.5;
+}
