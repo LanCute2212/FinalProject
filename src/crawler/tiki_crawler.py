@@ -82,6 +82,13 @@ class TikiCrawler(BaseCrawler):
             category = info.get("category", "Chưa phân loại")
         if shop_id == "auto":
             shop_id = info["seller_id"]
+        self.product_info = {
+            **info,
+            "platform": self.platform_name,
+            "shop_id": shop_id,
+            "product_name": product_name,
+            "category": category,
+        }
 
         limit_desc = f"tối đa {max_reviews}" if max_reviews > 0 else "TOÀN BỘ (không giới hạn)"
         logger.info(f"Bắt đầu cào review Tiki: [{product_name}] (ID: {product_id}, Ngành hàng: [{category}], Giới hạn: {limit_desc})")

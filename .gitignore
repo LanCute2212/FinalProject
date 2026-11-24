@@ -34,6 +34,7 @@ models/
 .system_generated/
 scratch/
 temp/
+data/exports/
 
 # Local project guidance
 HD De tai nhom Long Mạnh.pdf

@@ -8,6 +8,7 @@ import pandas as pd
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.preprocessing.pipeline import PreprocessingPipeline
+from src.storage.sql_server_store import SQLServerStore, sqlserver_is_configured
 from src.utils.logger import get_logger
 
 logger = get_logger("run_preprocess")
@@ -39,11 +40,18 @@ def load_all_raw_data(raw_dir: str = "data/raw") -> pd.DataFrame:
 
     combined_df = pd.concat(dfs, ignore_index=True)
     
-    # Khử trùng lặp theo review_id nếu có
+    # Keep identical review IDs from different products/platforms distinct.
     if "review_id" in combined_df.columns:
         combined_df["review_id"] = combined_df["review_id"].astype(str)
         before_len = len(combined_df)
-        combined_df = combined_df.drop_duplicates(subset=["review_id"], keep="last")
+        identity_columns = [
+            column for column in ("platform", "product_id", "review_id")
+            if column in combined_df.columns
+        ]
+        combined_df = combined_df.drop_duplicates(
+            subset=identity_columns or ["review_id"],
+            keep="last",
+        )
         dedup_count = before_len - len(combined_df)
         if dedup_count > 0:
             logger.info(f"Đã loại bỏ {dedup_count} bản ghi trùng lặp giữa các bộ.")
@@ -149,7 +157,12 @@ def display_statistics(df: pd.DataFrame):
         print(f" • TÁCH TỪ (SEGMENT): {row['comment_text_segmented']}")
     print("\n" + "="*70 + "\n")
 
-def run_full_preprocessing(raw_dir: str = "data/raw", input_file: str = None, output_path: str = "data/processed/reviews_processed.csv") -> pd.DataFrame:
+def run_full_preprocessing(
+    raw_dir: str = "data/raw",
+    input_file: str = None,
+    output_path: str = "data/processed/reviews_processed.csv",
+    sync_sql_server: bool = True,
+) -> pd.DataFrame:
     """Hàm chạy toàn diện tiền xử lý dữ liệu từ tất cả raw files hoặc file chỉ định."""
     pipeline = PreprocessingPipeline()
     
@@ -164,6 +177,12 @@ def run_full_preprocessing(raw_dir: str = "data/raw", input_file: str = None, ou
         processed_df.to_csv(output_path, index=False, encoding="utf-8-sig")
         logger.info(f"Đã lưu kết quả gộp vào: {output_path}")
 
+    if sync_sql_server and sqlserver_is_configured():
+        with SQLServerStore() as store:
+            store.ping()
+            upserted = store.upsert_reviews(processed_df.to_dict("records"))
+        logger.info(f"Đã đồng bộ {upserted} review đã xử lý vào SQL Server.")
+
     display_statistics(processed_df)
     return processed_df
 
@@ -172,9 +191,15 @@ def main():
     parser.add_argument("--input", type=str, default=None, help="Đường dẫn file raw CSV/JSON đầu vào (nếu bỏ trống sẽ gộp tất cả)")
     parser.add_argument("--raw_dir", type=str, default="data/raw", help="Thư mục raw data")
     parser.add_argument("--output", type=str, default="data/processed/reviews_processed.csv", help="Đường dẫn lưu file sạch")
+    parser.add_argument("--csv_only", action="store_true", help="Chỉ xuất CSV, không đồng bộ SQL Server")
 
     args = parser.parse_args()
-    run_full_preprocessing(raw_dir=args.raw_dir, input_file=args.input, output_path=args.output)
+    run_full_preprocessing(
+        raw_dir=args.raw_dir,
+        input_file=args.input,
+        output_path=args.output,
+        sync_sql_server=not args.csv_only,
+    )
 
 if __name__ == "__main__":
     main()

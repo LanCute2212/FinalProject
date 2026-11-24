@@ -34,6 +34,7 @@ from scripts.run_eda import build_report, load_aspects
 from src.features.aspect_discovery import discover_aspect_candidates, normalize_phrase
 from src.features.feature_engineering import FeatureEngineeringPipeline
 from src.preprocessing.pipeline import PreprocessingPipeline
+from src.storage.sql_server_store import DEFAULT_DATABASE_NAME, SQLServerStore
 
 # Import Design System & Chart Modules
 import ui.charts as charts
@@ -77,12 +78,28 @@ def get_file_mtime(path: str) -> float:
         return 0.0
 
 
-@st.cache_data(show_spinner=False)
-def load_data(path: str, mtime: float) -> pd.DataFrame:
+@st.cache_data(show_spinner=False, ttl=30)
+def load_data(
+    path: str,
+    mtime: float,
+    data_source: str = "CSV",
+    sql_server: str = "localhost",
+    database_name: str = DEFAULT_DATABASE_NAME,
+) -> pd.DataFrame:
     del mtime
-    frame = pd.read_csv(path)
-    frame["rating"] = pd.to_numeric(frame["rating"], errors="coerce").fillna(0).astype(int)
-    frame["created_at"] = pd.to_datetime(frame["created_at"], errors="coerce")
+    if data_source == "SQL Server":
+        with SQLServerStore(
+            server=sql_server,
+            database_name=database_name,
+        ) as store:
+            store.ping()
+            frame = store.load_reviews_dataframe()
+    else:
+        frame = pd.read_csv(path)
+    if "rating" in frame.columns:
+        frame["rating"] = pd.to_numeric(frame["rating"], errors="coerce").fillna(0).astype(int)
+    if "created_at" in frame.columns:
+        frame["created_at"] = pd.to_datetime(frame["created_at"], errors="coerce")
     return frame
 
 
@@ -1814,18 +1831,48 @@ def main() -> None:
     )
 
     # Cài đặt nâng cao gom trong Expander
-    with st.sidebar.expander(":material/settings: Cài đặt nâng cao"):
-        data_path = st.text_input("Đường dẫn tệp dữ liệu:", str(DEFAULT_DATA))
-        file_mtime = get_file_mtime(data_path)
+    advanced_settings = st.sidebar.expander(":material/settings: Cài đặt nâng cao")
+    with advanced_settings:
+        data_source = searchable_selectbox(
+            "Nguồn dữ liệu:",
+            ["CSV", "SQL Server"],
+            key="dashboard_data_source",
+            container=advanced_settings,
+        )
+        if data_source == "SQL Server":
+            data_path = str(DEFAULT_DATA)
+            sql_server = st.text_input(
+                "SQL Server instance:",
+                os.getenv("SQLSERVER_SERVER", "localhost"),
+            )
+            database_name = st.text_input(
+                "Tên database:",
+                os.getenv("SQLSERVER_DATABASE", DEFAULT_DATABASE_NAME),
+            )
+        else:
+            data_path = st.text_input("Đường dẫn tệp dữ liệu:", str(DEFAULT_DATA))
+            sql_server = "localhost"
+            database_name = DEFAULT_DATABASE_NAME
+        file_mtime = get_file_mtime(data_path) if data_source == "CSV" else 0.0
         if st.button("Làm mới bộ nhớ đệm", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
 
     # Nạp dữ liệu
     try:
-        df = load_data(data_path, file_mtime)
+        df = load_data(
+            data_path,
+            file_mtime,
+            data_source=data_source,
+            sql_server=sql_server,
+            database_name=database_name,
+        )
     except Exception as error:
-        st.sidebar.error(f"Không thể đọc tệp dữ liệu: {error}")
+        st.sidebar.error(f"Không thể nạp dữ liệu từ {data_source}: {error}")
+        st.stop()
+
+    if df.empty:
+        st.info("Nguồn dữ liệu chưa có review. Hãy import CSV hoặc chạy crawler trước.")
         st.stop()
 
     st.sidebar.markdown("---")
