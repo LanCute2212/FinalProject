@@ -45,6 +45,7 @@ e:\Đồ án\
 ## 2. Hướng dẫn sử dụng nhanh
 
 Môi trường đã được cấu hình sẵn tại `.venv` (Python 3.11).
+Các danh sách chọn trong dashboard có ô tìm kiếm ngay bên dưới; ô tìm kiếm hỗ trợ từ khóa tiếng Việt không dấu.
 
 ### 2.1. Sinh dữ liệu mẫu & chạy thử nghiệm ngay lập tức
 
@@ -81,7 +82,20 @@ Nếu nhóm đã có file CSV tự cào trước đó, chỉ cần chạy:
 ```powershell
 & ".\.venv\Scripts\python.exe" "scripts\run_preprocess.py" --input "đường_dẫn_file_của_nhóm.csv" --output "data\processed\reviews_processed.csv"
 ```
-*(File CSV chỉ cần có cột nội dung đánh giá: `comment_text` hoặc `review_text`)*
+*(File CSV đầu vào cần có cột nội dung đánh giá `comment_text`.)*
+
+### 2.4. Gán nhãn thủ công để chuẩn bị tập đánh giá
+
+Khởi động Dashboard:
+```powershell
+& ".\.venv\Scripts\python.exe" -m streamlit run app.py
+```
+
+Trong **Phòng Nghiên cứu & Mô hình AI** → **Công cụ Gán nhãn Dữ liệu Thủ công**, chọn review và gán sentiment/aspect theo nội dung. Nhãn được lưu tại `data/processed/manual_labels.csv`, phân biệt review bằng nền tảng và mã review; có thể tải CSV từ giao diện. Nên gán nhãn cân bằng giữa ba lớp cảm xúc và không dùng nhãn suy ra từ rating làm nhãn đánh giá độc lập.
+
+### 2.5. Khám phá và duyệt từ khóa Aspect
+
+Trong **Phân tích Khía cạnh Sản phẩm (ABSA)** → **Khám phá từ khóa Aspect**, hệ thống gom các unigram/bigram/trigram chưa có trong `aspect_keywords.json` theo số review hợp lệ có chứa cụm từ. Xem review mẫu, chọn aspect hiện có hoặc tạo mã aspect mới; keyword chỉ được thêm sau khi xác nhận. Candidate bị bỏ qua được lưu tại `data/processed/aspect_candidates_ignored.json`. Đây là gợi ý dựa trên tần suất, không phải kết quả phân loại ngữ nghĩa tự động.
 
 ---
 
