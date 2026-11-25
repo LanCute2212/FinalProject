@@ -111,7 +111,7 @@ Sau khi cài dependencies từ `requirements.txt`, có thể import bộ process
 & ".\.venv\Scripts\python.exe" "scripts\export_sql_server_to_csv.py" --output "data\exports\reviews.csv"
 ```
 
-Khi đã cấu hình `SQLSERVER_SERVER`, crawler và preprocessing sẽ đồng bộ review sang SQL Server đồng thời vẫn ghi CSV/JSON. Dùng `--csv_only` để chạy riêng bằng CSV. Dashboard mặc định vẫn đọc CSV; chọn **SQL Server** trong **Cài đặt nâng cao** để đọc từ database. Lỗi kết nối SQL Server sẽ được báo rõ, không tự chuyển nguồn dữ liệu.
+Khi đã cấu hình `SQLSERVER_SERVER`, CLI crawler và preprocessing sẽ đồng bộ review sang SQL Server đồng thời vẫn ghi CSV/JSON. Dùng `--csv_only` để chạy riêng bằng CSV. Với crawler trên Dashboard, chọn **SQL Server** trong **Cài đặt nâng cao** trước khi crawl để lưu lịch sử vào `crawl_runs` và đồng bộ review; nếu chọn CSV thì lần crawl chỉ lưu file. Dashboard cũng dùng lựa chọn này để đọc dữ liệu. Lỗi kết nối SQL Server sẽ được báo rõ, không tự chuyển nguồn dữ liệu.
 
 ### 2.5. Gán nhãn thủ công để chuẩn bị tập đánh giá
 

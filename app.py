@@ -1390,10 +1390,36 @@ def _crawl_worker(
     output_dir: str,
     run_preprocess: bool,
     log_queue: queue.Queue,
+    sql_server: Optional[str] = None,
+    database_name: Optional[str] = None,
 ) -> None:
     """Chạy crawler trong luồng riêng, ghi log vào queue."""
+    sql_store = None
+    crawl_run_id = None
+    crawl_finished = False
+    reviews_collected = 0
+    reviews_upserted = 0
+    crawler = None
     try:
         log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] ▶ Khởi động crawler cho sàn {platform.upper()}…")
+
+        if sql_server and database_name:
+            sql_store = SQLServerStore(
+                server=sql_server,
+                database_name=database_name,
+            )
+            sql_store.ping()
+            crawl_run_id = sql_store.start_crawl_run(
+                platform=platform,
+                product_id=product_id,
+                shop_id=shop_id,
+                product_name=product_name or "",
+                category=category or "",
+                requested_reviews=max_reviews,
+            )
+            log_queue.put(
+                f"[{datetime.now().strftime('%H:%M:%S')}] 🗃️ Đã tạo lịch sử crawl trong SQL Server."
+            )
 
         if platform == "tiki":
             from src.crawler.tiki_crawler import TikiCrawler
@@ -1417,34 +1443,104 @@ def _crawl_worker(
             )
 
         saved = crawler.save_raw_data(output_dir=output_dir)
-        n_saved = len(crawler.reviews)
-        log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Thu thập xong {n_saved} đánh giá.")
+        reviews_collected = len(crawler.reviews)
+        log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Thu thập xong {reviews_collected} đánh giá.")
 
         if saved:
             log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 💾 Đã lưu: {saved.get('csv', 'N/A')}")
+
+        product = crawler.product_info or {
+            "platform": platform,
+            "product_id": product_id,
+            "shop_id": shop_id,
+            "product_name": product_name or f"Sản phẩm {product_id}",
+            "category": category or "Chưa phân loại",
+        }
+        if sql_store and crawl_run_id:
+            sql_store.upsert_product(product)
+            reviews_upserted = sql_store.upsert_reviews(
+                crawler.reviews,
+                crawl_run_id=crawl_run_id,
+            )
+            sql_store.finish_crawl_run(
+                run_id=crawl_run_id,
+                status="completed" if crawler.reviews else "no_reviews",
+                reviews_collected=reviews_collected,
+                reviews_upserted=reviews_upserted,
+                product=product,
+            )
+            crawl_finished = True
+            log_queue.put(
+                f"[{datetime.now().strftime('%H:%M:%S')}] 🗃️ Đã lưu lịch sử crawl và đồng bộ "
+                f"{reviews_upserted} review vào SQL Server."
+            )
 
         if run_preprocess and saved:
             log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] ⚙️ Đang chạy tiền xử lý dữ liệu…")
             try:
                 from scripts.run_preprocess import run_full_preprocessing
-                run_full_preprocessing(raw_dir=output_dir)
+                processed = run_full_preprocessing(
+                    raw_dir=output_dir,
+                    sync_sql_server=False,
+                )
+                if sql_store and not processed.empty:
+                    processed_upserted = sql_store.upsert_reviews(
+                        processed.to_dict("records")
+                    )
+                    log_queue.put(
+                        f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Đã đồng bộ "
+                        f"{processed_upserted} review đã xử lý vào SQL Server."
+                    )
                 log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Tiền xử lý hoàn tất! Dashboard sẽ được cập nhật khi bạn làm mới.")
             except Exception as exc:
                 log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Lỗi tiền xử lý: {exc}")
 
-        log_queue.put("__DONE__")
-
     except Exception as exc:
+        if sql_store and crawl_run_id and not crawl_finished:
+            try:
+                sql_store.finish_crawl_run(
+                    run_id=crawl_run_id,
+                    status="failed",
+                    reviews_collected=reviews_collected,
+                    reviews_upserted=reviews_upserted,
+                    error=str(exc),
+                    product=crawler.product_info if crawler else None,
+                )
+            except Exception as status_error:
+                log_queue.put(
+                    f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Không thể cập nhật lịch sử crawl: {status_error}"
+                )
         log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Lỗi crawler: {exc}")
-        log_queue.put("__DONE__")
+    finally:
+        try:
+            if sql_store:
+                sql_store.close()
+        except Exception as close_error:
+            log_queue.put(
+                f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Lỗi đóng kết nối SQL Server: {close_error}"
+            )
+        finally:
+            log_queue.put("__DONE__")
 
 
-def render_crawler() -> None:
+def render_crawler(
+    sql_server: Optional[str] = None,
+    database_name: Optional[str] = None,
+) -> None:
     """Module Thu thập Dữ liệu – giao diện Crawler trong Dashboard."""
     render_page_header(
         ":material/cloud_download: Thu thập Dữ liệu",
         "Cào đánh giá từ Tiki / Shopee, lưu raw data và tự động chạy tiền xử lý để cập nhật Dashboard.",
     )
+    if sql_server and database_name:
+        st.info(
+            f"Lịch sử và review crawl sẽ được ghi vào SQL Server `{database_name}` trên `{sql_server}`."
+        )
+    else:
+        st.warning(
+            "Dashboard đang dùng nguồn CSV. Muốn lưu lịch sử crawl vào database, "
+            "hãy chọn SQL Server trong Cài đặt nâng cao."
+        )
 
     with st.expander("Hướng dẫn sử dụng Crawler", expanded=False):
         st.markdown(
@@ -1508,6 +1604,8 @@ def render_crawler() -> None:
                         output_dir=tiki_output,
                         run_preprocess=tiki_preprocess,
                         log_queue=st.session_state["crawl_tiki_queue"],
+                        sql_server=sql_server,
+                        database_name=database_name,
                     ),
                     daemon=True,
                 )
@@ -1600,6 +1698,8 @@ def render_crawler() -> None:
                         output_dir=sp_output,
                         run_preprocess=sp_preprocess,
                         log_queue=st.session_state["crawl_sp_queue"],
+                        sql_server=sql_server,
+                        database_name=database_name,
                     ),
                     daemon=True,
                 )
@@ -2004,7 +2104,10 @@ def main() -> None:
             render_research_report(view, aspects)
 
     elif "Crawler" in nav_page:
-        render_crawler()
+        render_crawler(
+            sql_server=sql_server if data_source == "SQL Server" else None,
+            database_name=database_name if data_source == "SQL Server" else None,
+        )
 
     else:
         tab1, tab2, tab3 = st.tabs([
