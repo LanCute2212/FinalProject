@@ -71,18 +71,11 @@ if CSS_PATH.exists():
 # HÀM BỔ TRỢ HỆ THỐNG & CACHING DỮ LIỆU
 # ==============================================================================
 
-def get_file_mtime(path: str) -> float:
-    try:
-        return os.path.getmtime(path)
-    except OSError:
-        return 0.0
-
-
 @st.cache_data(show_spinner=False, ttl=30)
 def load_data(
     path: str,
     mtime: float,
-    data_source: str = "CSV",
+    data_source: str = "SQL Server",
     sql_server: str = "localhost",
     database_name: str = DEFAULT_DATABASE_NAME,
 ) -> pd.DataFrame:
@@ -1528,19 +1521,16 @@ def render_crawler(
     database_name: Optional[str] = None,
 ) -> None:
     """Module Thu thập Dữ liệu – giao diện Crawler trong Dashboard."""
+    sql_server = sql_server or os.getenv("SQLSERVER_SERVER") or "localhost"
+    database_name = (
+        database_name
+        or os.getenv("SQLSERVER_DATABASE")
+        or DEFAULT_DATABASE_NAME
+    )
     render_page_header(
         ":material/cloud_download: Thu thập Dữ liệu",
         "Cào đánh giá từ Tiki / Shopee, lưu raw data và tự động chạy tiền xử lý để cập nhật Dashboard.",
     )
-    if sql_server and database_name:
-        st.info(
-            f"Lịch sử và review crawl sẽ được ghi vào SQL Server `{database_name}` trên `{sql_server}`."
-        )
-    else:
-        st.warning(
-            "Dashboard đang dùng nguồn CSV. Muốn lưu lịch sử crawl vào database, "
-            "hãy chọn SQL Server trong Cài đặt nâng cao."
-        )
 
     with st.expander("Hướng dẫn sử dụng Crawler", expanded=False):
         st.markdown(
@@ -1930,30 +1920,15 @@ def main() -> None:
         label_visibility="collapsed",
     )
 
+    sql_server = os.getenv("SQLSERVER_SERVER") or "localhost"
+    database_name = (
+        os.getenv("SQLSERVER_DATABASE")
+        or DEFAULT_DATABASE_NAME
+    )
+
     # Cài đặt nâng cao gom trong Expander
     advanced_settings = st.sidebar.expander(":material/settings: Cài đặt nâng cao")
     with advanced_settings:
-        data_source = searchable_selectbox(
-            "Nguồn dữ liệu:",
-            ["CSV", "SQL Server"],
-            key="dashboard_data_source",
-            container=advanced_settings,
-        )
-        if data_source == "SQL Server":
-            data_path = str(DEFAULT_DATA)
-            sql_server = st.text_input(
-                "SQL Server instance:",
-                os.getenv("SQLSERVER_SERVER", "localhost"),
-            )
-            database_name = st.text_input(
-                "Tên database:",
-                os.getenv("SQLSERVER_DATABASE", DEFAULT_DATABASE_NAME),
-            )
-        else:
-            data_path = st.text_input("Đường dẫn tệp dữ liệu:", str(DEFAULT_DATA))
-            sql_server = "localhost"
-            database_name = DEFAULT_DATABASE_NAME
-        file_mtime = get_file_mtime(data_path) if data_source == "CSV" else 0.0
         if st.button("Làm mới bộ nhớ đệm", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
@@ -1961,18 +1936,24 @@ def main() -> None:
     # Nạp dữ liệu
     try:
         df = load_data(
-            data_path,
-            file_mtime,
-            data_source=data_source,
+            str(DEFAULT_DATA),
+            0.0,
+            data_source="SQL Server",
             sql_server=sql_server,
             database_name=database_name,
         )
     except Exception as error:
-        st.sidebar.error(f"Không thể nạp dữ liệu từ {data_source}: {error}")
+        st.sidebar.error(f"Không thể nạp dữ liệu từ SQL Server: {error}")
         st.stop()
 
     if df.empty:
-        st.info("Nguồn dữ liệu chưa có review. Hãy import CSV hoặc chạy crawler trước.")
+        if "Crawler" in nav_page:
+            render_crawler(
+                sql_server=sql_server,
+                database_name=database_name,
+            )
+            return
+        st.info("Database chưa có review. Hãy chạy crawler để bắt đầu thu thập dữ liệu.")
         st.stop()
 
     st.sidebar.markdown("---")
@@ -2105,8 +2086,8 @@ def main() -> None:
 
     elif "Crawler" in nav_page:
         render_crawler(
-            sql_server=sql_server if data_source == "SQL Server" else None,
-            database_name=database_name if data_source == "SQL Server" else None,
+            sql_server=sql_server,
+            database_name=database_name,
         )
 
     else:
