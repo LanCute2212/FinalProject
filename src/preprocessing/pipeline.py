@@ -96,7 +96,7 @@ class PreprocessingPipeline:
 
         # Áp dụng từng bước xử lý
         results = [self.process_single_text(t) for t in df["comment_text_raw"]]
-        res_df = pd.DataFrame(results)
+        res_df = pd.DataFrame(results, index=df.index)
 
         # Ghép kết quả vào DataFrame chính
         for col in res_df.columns:

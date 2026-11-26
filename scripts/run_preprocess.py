@@ -162,6 +162,7 @@ def run_full_preprocessing(
     input_file: str = None,
     output_path: str = "data/processed/reviews_processed.csv",
     sync_sql_server: bool = True,
+    show_statistics: bool = True,
 ) -> pd.DataFrame:
     """Hàm chạy toàn diện tiền xử lý dữ liệu từ tất cả raw files hoặc file chỉ định."""
     pipeline = PreprocessingPipeline()
@@ -183,7 +184,8 @@ def run_full_preprocessing(
             upserted = store.upsert_reviews(processed_df.to_dict("records"))
         logger.info(f"Đã đồng bộ {upserted} review đã xử lý vào SQL Server.")
 
-    display_statistics(processed_df)
+    if show_statistics:
+        display_statistics(processed_df)
     return processed_df
 
 def main():

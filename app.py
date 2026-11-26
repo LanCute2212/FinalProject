@@ -1475,6 +1475,7 @@ def _crawl_worker(
                 processed = run_full_preprocessing(
                     raw_dir=output_dir,
                     sync_sql_server=False,
+                    show_statistics=False,
                 )
                 if sql_store and not processed.empty:
                     processed_upserted = sql_store.upsert_reviews(
