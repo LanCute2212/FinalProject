@@ -1,0 +1,27 @@
+{
+  "training_source_rows": 272,
+  "manual_source_rows": 272,
+  "non_manual_rows_excluded": 0,
+  "usable_training_rows": 266,
+  "training_issue_rows": 7,
+  "training_quarantined_rows": 3,
+  "audit_issue_rows": 265,
+  "training_issue_counts": {
+    "duplicate_consistent": 3,
+    "conflicting_connected_labels_or_text": 2,
+    "reference_label_conflict": 2
+  },
+  "legacy_reference_rows": 370,
+  "legacy_reference_labeled_rows": 237,
+  "legacy_reference_unlabeled_rows": 133,
+  "legacy_reference_ai_reviewed_rows": 370,
+  "legacy_reference_is_independent_test": false,
+  "training_label_distribution": {
+    "positive": 222,
+    "negative": 22,
+    "neutral": 22
+  },
+  "training_dataset_fingerprint": "77f1d6936b3b5a0a922194d37fc80c029adfd608142cf0b0b49189288d9e6a0f",
+  "reference_dataset_fingerprint": "bde77eca3f354310e29768022595764332bbbe887173d6454e7a2166ec73868e",
+  "processed_dataset_fingerprint": "a7e61f91d0d8197d4519ed093acde4b6a16ee5ad090f23d3a7869dc29ed333b5"
+}

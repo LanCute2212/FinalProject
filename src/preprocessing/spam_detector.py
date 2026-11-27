@@ -3,7 +3,7 @@ import re
 import json
 import hashlib
 import pandas as pd
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from src.utils.logger import get_logger
 
 logger = get_logger("spam_detector")
@@ -33,36 +33,66 @@ class SpamDetector:
         Kiểm tra 1 review có phải là spam/rác không.
         Trả về: (is_spam: bool, reason: str)
         """
-        raw_str = (raw_text or "").strip()
-        clean_str = (clean_text or "").strip().lower()
+        raw_str = "" if raw_text is None or pd.isna(raw_text) else str(raw_text).strip()
+        clean_str = "" if clean_text is None or pd.isna(clean_text) else str(clean_text).strip().lower()
+        missing_values = {"", "nan", "none", "null", "n/a", "na"}
 
         # 1. Rỗng hoặc chỉ chứa khoảng trắng
-        if not raw_str:
+        if raw_str.lower() in missing_values or clean_str in missing_values:
             return True, "EMPTY_TEXT"
 
-        # 2. Quá ngắn (ít hơn 3 ký tự hoặc ít hơn 2 từ)
-        words = clean_str.split()
-        if len(clean_str) < 3 or len(words) < 2:
-            return True, "TOO_SHORT"
-
-        # 3. Trùng 100% với các câu gợi ý mặc định của sàn TMĐT
+        # 2. Trùng 100% với các câu gợi ý mặc định của sàn TMĐT
         if clean_str in self.exact_default_phrases:
             return True, "DEFAULT_PLATFORM_TEMPLATE"
 
-        # 4. Chứa các mẫu chữ săn xu, hình ảnh không liên quan
+        # 3. Chứa các mẫu chữ săn xu, hình ảnh không liên quan
         for pattern in self.spam_regex_patterns:
             if pattern in clean_str or pattern in raw_str.lower():
                 return True, "COIN_FARMING_SPAM"
 
-        # 5. Ký tự lặp đơn điệu (độ đa dạng từ vựng quá thấp, vd: 'aaaaa', '11111')
-        unique_chars = set(clean_str.replace(" ", ""))
-        if len(clean_str) >= 10 and len(unique_chars) <= 2:
+        # Kiểm tra trên cả raw để TextCleaner chưa rút gọn mất tín hiệu lặp.
+        # Ví dụ "aaaaaaaaaa" nếu kiểm tra sau khi clean chỉ còn "a".
+        noise_candidates = (raw_str.lower(), clean_str)
+        if any(
+            len(compact := re.sub(r"\s+", "", candidate)) >= 10
+            and len(set(compact)) <= 2
+            for candidate in noise_candidates
+        ):
             return True, "REPETITIVE_CHAR_NOISE"
 
         return False, "VALID"
 
+    @staticmethod
+    def check_low_information(clean_text: str) -> Tuple[bool, str]:
+        """
+        Phân biệt bình luận ít thông tin khỏi spam.
+        Một từ duy nhất có nghĩa vẫn được xem là review hợp lệ.
+        """
+        clean_str = "" if clean_text is None or pd.isna(clean_text) else str(clean_text).strip().lower()
+        missing_values = {"", "nan", "none", "null", "n/a", "na"}
+        if clean_str in missing_values:
+            return True, "EMPTY_TEXT"
+
+        # Emoji tags carry sentiment information even though they use underscores.
+        emoji_tags = {"_pos_emoji_", "_neg_emoji_", "_neu_emoji_"}
+        words_without_tags = clean_str
+        for tag in emoji_tags:
+            words_without_tags = words_without_tags.replace(tag, " ")
+        words = re.findall(r"[^\W_]+", words_without_tags, flags=re.UNICODE)
+        meaningful_words = words + [tag for tag in emoji_tags if tag in clean_str.split()]
+        if len(meaningful_words) < 1:
+            return True, "NO_MEANINGFUL_TEXT"
+        if len(meaningful_words) == 1:
+            return True, "ONE_WORD_REVIEW"
+        return False, "SUFFICIENT_TEXT"
+
     @classmethod
-    def mark_duplicates(cls, df: pd.DataFrame, text_column: str = "comment_text_clean") -> pd.DataFrame:
+    def mark_duplicates(
+        cls,
+        df: pd.DataFrame,
+        text_column: str = "comment_text_clean",
+        duplicate_key_columns: Optional[List[str]] = None,
+    ) -> pd.DataFrame:
         """
         Đánh dấu các review trùng lặp (BR12) bằng hàm băm MD5.
         Giữ lại bản ghi đầu tiên, các bản ghi sau gắn is_duplicate = True.
@@ -73,16 +103,46 @@ class SpamDetector:
 
         # Tính hash MD5 cho từng dòng text đã clean
         def get_hash(text):
-            if not text or pd.isna(text):
+            if text is None or pd.isna(text):
                 return ""
-            return hashlib.md5(str(text).strip().encode("utf-8")).hexdigest()
+            normalized = str(text).strip().lower()
+            if normalized in {"", "nan", "none", "null", "n/a", "na"}:
+                return ""
+            return hashlib.md5(normalized.encode("utf-8")).hexdigest()
 
-        hashes = df[text_column].apply(get_hash)
-        
-        # Chỉ xét trùng lặp với các text có hash (không rỗng)
-        is_dup = hashes.duplicated(keep="first") & (hashes != "")
+        hashes = [get_hash(text) for text in df[text_column].tolist()]
+        duplicate_candidates = [bool(value) for value in hashes]
+
+        if duplicate_key_columns:
+            available_keys = [column for column in duplicate_key_columns if column in df.columns]
+            if available_keys:
+                # Keep key columns separate instead of joining with a delimiter:
+                # values containing "||" could otherwise collide.
+                duplicate_frame = df[available_keys].copy().reset_index(drop=True)
+                duplicate_frame["__content_hash__"] = hashes
+                duplicate_frame["__has_content__"] = duplicate_candidates
+                is_dup = (
+                    duplicate_frame["__has_content__"]
+                    & duplicate_frame.duplicated(
+                        subset=[*available_keys, "__content_hash__"], keep="first"
+                    )
+                ).to_numpy(dtype=bool)
+            else:
+                duplicate_frame = pd.DataFrame({"hash": hashes, "has_content": duplicate_candidates})
+                is_dup = (
+                    duplicate_frame["has_content"]
+                    & duplicate_frame.duplicated(subset=["hash"], keep="first")
+                ).to_numpy(dtype=bool)
+        else:
+            duplicate_frame = pd.DataFrame({"hash": hashes, "has_content": duplicate_candidates})
+            is_dup = (
+                duplicate_frame["has_content"]
+                & duplicate_frame.duplicated(subset=["hash"], keep="first")
+            ).to_numpy(dtype=bool)
+
         df["is_duplicate"] = is_dup
         
-        dup_count = is_dup.sum()
-        logger.info(f"Phát hiện {dup_count} review trùng lặp nội dung ({dup_count/len(df)*100:.2f}%).")
+        dup_count = int(sum(is_dup))
+        percentage = dup_count / len(df) * 100 if len(df) else 0.0
+        logger.info(f"Phát hiện {dup_count} review trùng lặp nội dung ({percentage:.2f}%).")
         return df

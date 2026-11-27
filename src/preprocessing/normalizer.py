@@ -1,10 +1,12 @@
 import os
 import re
 import json
+from pathlib import Path
 from typing import Dict, Optional, List
 from src.utils.logger import get_logger
 
 logger = get_logger("text_normalizer")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 class TextNormalizer:
     """
@@ -26,18 +28,24 @@ class TextNormalizer:
         # Sắp xếp các cụm từ dài trước để tránh match từ ngắn trước (vd: "không phải" trước "không")
         sorted_keys = sorted(self.teencode_dict.keys(), key=lambda x: len(x), reverse=True)
         escaped_keys = [re.escape(k) for k in sorted_keys]
-        self.teencode_regex = re.compile(r"(?<!\w)(" + "|".join(escaped_keys) + r")(?!\w)", re.IGNORECASE)
+        self.teencode_regex = (
+            re.compile(r"(?<!\w)(" + "|".join(escaped_keys) + r")(?!\w)", re.IGNORECASE)
+            if escaped_keys else None
+        )
 
     def _load_json(self, path: str) -> Dict:
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
+        candidate = Path(path)
+        if not candidate.is_absolute() and not candidate.exists():
+            candidate = PROJECT_ROOT / candidate
+        if candidate.exists():
+            with candidate.open("r", encoding="utf-8") as f:
                 return json.load(f)
         logger.warning(f"Không tìm thấy file từ điển tại {path}. Dùng từ điển rỗng.")
         return {}
 
     def normalize_teencode(self, text: str) -> str:
         """Thay thế teencode và từ viết tắt bằng từ tiếng Việt chuẩn."""
-        if not text or not self.teencode_dict:
+        if not text or not self.teencode_dict or self.teencode_regex is None:
             return text
 
         def replace_match(match):

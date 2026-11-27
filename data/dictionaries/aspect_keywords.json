@@ -1,7 +1,9 @@
 {
-  "quality": ["chất lượng", "bền", "lỗi", "hỏng", "chập chờn", "âm thanh", "pin", "kết nối", "êm", "nóng"],
-  "delivery": ["giao hàng", "ship", "vận chuyển", "giao nhanh", "giao chậm", "shipper", "nhận hàng"],
-  "packaging": ["đóng gói", "bao bì", "hộp", "móp", "chống sốc", "gãy", "trầy xước"],
+  "quality": ["chất lượng", "âm thanh", "kết nối", "êm", "mượt", "lỗi", "hỏng", "chập chờn", "nóng", "nóng máy"],
   "price": ["giá", "đắt", "rẻ", "sale", "đáng tiền", "tầm giá"],
+  "design": ["thiết kế", "kiểu dáng", "mẫu mã", "màu sắc", "màu", "ngoại hình", "thẩm mỹ", "đẹp", "xấu", "nhỏ gọn", "cồng kềnh"],
+  "durability": ["độ bền", "bền", "bền bỉ", "tuổi thọ", "dùng lâu", "xuống cấp", "nhanh xuống cấp", "thời lượng pin", "pin trâu", "hao pin", "tụt pin", "chai pin"],
+  "packaging": ["đóng gói", "bao bì", "hộp", "móp", "chống sốc", "trầy xước"],
+  "delivery": ["giao hàng", "ship", "vận chuyển", "giao nhanh", "giao chậm", "shipper", "nhận hàng"],
   "service": ["shop", "tư vấn", "bảo hành", "hoàn tiền", "đổi trả", "phản hồi", "rep"]
 }

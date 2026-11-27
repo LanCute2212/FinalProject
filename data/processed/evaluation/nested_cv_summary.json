@@ -1,0 +1,61 @@
+{
+  "protocol": "nested_stratified_cv",
+  "outer_splits": 5,
+  "outer_repeats": 1,
+  "inner_splits": 3,
+  "inner_selection_metric": "macro_f1",
+  "outer_reporting_metrics": {
+    "accuracy_mean": 0.7707197763801539,
+    "accuracy_std": 0.04053441033230418,
+    "macro_precision_mean": 0.544958645690353,
+    "macro_precision_std": 0.11372577553588738,
+    "macro_recall_mean": 0.5897306397306397,
+    "macro_recall_std": 0.1228377821545253,
+    "macro_f1_mean": 0.5341899614668947,
+    "macro_f1_std": 0.07401452488983919,
+    "weighted_f1_mean": 0.7906042747141069,
+    "weighted_f1_std": 0.02485399430382656
+  },
+  "per_class_recall": {
+    "negative": {
+      "mean": 0.5900000000000001,
+      "std": 0.30495901363953815
+    },
+    "neutral": {
+      "mean": 0.35,
+      "std": 0.3082207001484488
+    },
+    "positive": {
+      "mean": 0.8291919191919191,
+      "std": 0.08394662599969688
+    }
+  },
+  "confusion_matrix": [
+    [
+      13,
+      4,
+      5
+    ],
+    [
+      5,
+      8,
+      9
+    ],
+    [
+      9,
+      29,
+      184
+    ]
+  ],
+  "full_data_inner_best_params": {
+    "C": 0.5,
+    "class_weight": {
+      "negative": 8.0,
+      "neutral": 12.0,
+      "positive": 0.5
+    }
+  },
+  "full_data_inner_best_macro_f1_tuning_score": 0.5712020045284687,
+  "final_model_name": "logistic_word_nested_tuned",
+  "independent_test_available": false
+}

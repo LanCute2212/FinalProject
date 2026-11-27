@@ -7,6 +7,7 @@ TUYỆT ĐỐI KHÔNG thay đổi logic xử lý dữ liệu, tên hàm nghiệp
 """
 
 import io
+import json
 import os
 import queue
 import re
@@ -21,15 +22,14 @@ from typing import Dict, List, Optional, Tuple
 import joblib
 import pandas as pd
 import streamlit as st
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
-from sklearn.model_selection import train_test_split
-from sklearn.pipeline import Pipeline
-from sklearn.svm import LinearSVC
-
 from scripts.run_eda import build_report, load_aspects
 from src.features.feature_engineering import FeatureEngineeringPipeline
+from src.modeling.sentiment_evaluation import (
+    evaluate_models,
+    load_audited_training_data,
+    train_and_save_best_model,
+    write_evaluation_artifacts,
+)
 from src.preprocessing.pipeline import PreprocessingPipeline
 
 # Import Design System & Chart Modules
@@ -40,7 +40,10 @@ ROOT = Path(__file__).parent
 DEFAULT_DATA = ROOT / "data" / "processed" / "reviews_processed.csv"
 ASPECT_DATA = ROOT / "data" / "dictionaries" / "aspect_keywords.json"
 MODEL_PATH = ROOT / "models" / "sentiment_model.joblib"
+MODEL_METADATA_PATH = ROOT / "models" / "sentiment_model_metadata.json"
 CSS_PATH = ROOT / "ui" / "style.css"
+MANUAL_LABELS_PATH = ROOT / "data" / "processed" / "manual_labels.csv"
+MANUAL_LABELS_REFERENCE_PATH = ROOT / "data" / "processed" / "manual_labels_test.csv"
 
 # ==============================================================================
 # CẤU HÌNH TRANG VÀ NẠP CSS DESIGN SYSTEM
@@ -88,6 +91,104 @@ def valid_rows(frame: pd.DataFrame) -> pd.DataFrame:
     return frame[frame["is_valid_for_analysis"].astype(bool)]
 
 
+def manual_label_candidates(
+    frame: pd.DataFrame,
+    manual_labels: List[dict],
+    show_labeled: bool = False,
+) -> pd.DataFrame:
+    candidates = valid_rows(frame)
+    if "platform" not in candidates.columns or "review_id" not in candidates.columns:
+        return candidates.iloc[0:0]
+
+    candidates = candidates[
+        candidates["platform"].notna()
+        & candidates["platform"].astype(str).str.strip().ne("")
+    ]
+    if not show_labeled:
+        unlabeled_mask = candidates.apply(
+            lambda row: _find_manual_label(
+                manual_labels, row.get("platform", ""), row.get("review_id", "")
+            ) is None,
+            axis=1,
+        )
+        candidates = candidates[unlabeled_mask]
+    return candidates
+
+
+def _review_label_key(platform: object, review_id: object) -> Tuple[str, str]:
+    """Return a platform-scoped review key while tolerating legacy labels."""
+    platform_value = "" if platform is None or pd.isna(platform) else str(platform)
+    review_id_value = "" if review_id is None or pd.isna(review_id) else str(review_id)
+    return (
+        platform_value.strip().lower(),
+        review_id_value.strip(),
+    )
+
+
+def _find_manual_label(
+    labels: List[dict], platform: object, review_id: object
+) -> Optional[dict]:
+    target = _review_label_key(platform, review_id)
+    for label in labels:
+        label_key = _review_label_key(label.get("platform", ""), label.get("review_id", ""))
+        if label_key == target:
+            return label
+        # Older rows did not store platform. Match those conservatively by ID.
+        if not label_key[0] and label_key[1] == target[1]:
+            return label
+    return None
+
+
+def misclassified_test_rows(
+    data: pd.DataFrame,
+    x_test: pd.Series,
+    y_test: pd.Series,
+    predictions,
+) -> pd.DataFrame:
+    label_names = {
+        "negative": "Tiêu cực",
+        "neutral": "Trung tính",
+        "positive": "Tích cực",
+    }
+    columns = [
+        column for column in ["review_id", "product_name", "rating"]
+        if column in data.columns
+    ]
+    errors = data.loc[x_test.index, columns].copy()
+    if "review_id" not in errors.columns:
+        errors.insert(0, "review_id", x_test.index.astype(str))
+    errors["comment_text"] = data.loc[x_test.index, "text_original"].astype(str)
+    errors["sentiment_actual"] = y_test.map(label_names)
+    errors["sentiment_predicted"] = pd.Series(
+        predictions, index=x_test.index
+    ).map(label_names)
+    return errors[
+        errors["sentiment_actual"] != errors["sentiment_predicted"]
+    ].rename(columns={
+        "review_id": "Mã đánh giá",
+        "product_name": "Sản phẩm",
+        "rating": "Số sao",
+        "comment_text": "Nội dung bình luận",
+        "sentiment_actual": "Nhãn thủ công",
+        "sentiment_predicted": "Mô hình dự đoán",
+    })
+
+
+def load_manual_labels() -> pd.DataFrame:
+    if not MANUAL_LABELS_PATH.exists():
+        return pd.DataFrame()
+    return pd.read_csv(MANUAL_LABELS_PATH, encoding="utf-8-sig")
+
+
+def save_manual_labels(labels: List[dict]) -> None:
+    MANUAL_LABELS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(labels).to_csv(
+        MANUAL_LABELS_PATH,
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+
 def sentiment_label_vn(rating: pd.Series) -> pd.Series:
     return pd.cut(
         rating,
@@ -107,26 +208,96 @@ def sentiment_summary(frame: pd.DataFrame) -> pd.DataFrame:
 
 POSITIVE_ASPECT_TERMS = ("tốt", "hay", "đẹp", "nhanh", "ổn", "hài lòng", "ưng ý", "mượt", "đáng tiền", "chuẩn", "chính hãng")
 NEGATIVE_ASPECT_TERMS = ("lỗi", "hỏng", "chậm", "tệ", "thất vọng", "móp", "trầy", "đắt", "kém", "chập chờn", "kém chất lượng")
+ASPECT_SENTIMENT_NEGATIONS = ("không", "chẳng", "chả", "chưa", "ko", "khum", "hông")
+ASPECT_CONTRAST_MARKERS = ("nhưng", "tuy nhiên", "song", "trái lại", "ngược lại")
 
 
 def build_aspect_sentiment_rows(text: str, aspect_keywords: dict, meta: dict = None) -> list[dict]:
+    """Extract aspect sentiment with a lightweight, clause-local lexicon heuristic.
+
+    This is an explainable baseline, not a trained ABSA model. Unicode-aware
+    word boundaries prevent partial-token matches; the explicit "đánh giá"
+    exception avoids treating the verb phrase as a mention of price.
+    """
     normalized = re.sub(r"[\s_]+", " ", str(text or "").lower()).strip()
+
+    def term_pattern(term: str) -> re.Pattern:
+        normalized_term = re.sub(r"[\s_]+", " ", str(term).lower()).strip()
+        if not normalized_term:
+            return re.compile(r"(?!x)x")
+        pieces = [re.escape(piece) for piece in normalized_term.split()]
+        return re.compile(r"(?<!\w)" + r"\s+".join(pieces) + r"(?!\w)", re.UNICODE)
+
+    def term_occurs(clause: str, term: str, aspect: str = "") -> bool:
+        pattern = term_pattern(term)
+        for match in pattern.finditer(clause):
+            # "giá" is common inside the non-price phrase "đánh giá".
+            normalized_term = re.sub(r"[\s_]+", " ", str(term).lower()).strip()
+            if aspect.lower() == "price" and normalized_term.startswith("giá"):
+                prefix = clause[:match.start()]
+                if re.search(r"(?:^|\s)đánh\s+$", prefix, re.UNICODE):
+                    continue
+            return True
+        return False
+
+    # Punctuation and contrast markers create local opinion clauses. Commas
+    # are included because reviews often list separate aspects this way.
+    clause_splitter = re.compile(
+        r"[,;:!?\.\n]+|\b(?:"
+        + "|".join(
+            re.escape(marker)
+            for marker in sorted(ASPECT_CONTRAST_MARKERS, key=len, reverse=True)
+        )
+        + r")\b",
+        re.UNICODE,
+    )
+    clauses = [part.strip() for part in clause_splitter.split(normalized) if part.strip()]
+
+    positive_patterns = [(term, term_pattern(term)) for term in POSITIVE_ASPECT_TERMS]
+    negative_patterns = [(term, term_pattern(term)) for term in NEGATIVE_ASPECT_TERMS]
+
+    def clause_polarities(clause: str) -> set[str]:
+        polarities = set()
+        for base_polarity, terms in (
+            ("positive", positive_patterns),
+            ("negative", negative_patterns),
+        ):
+            for _, pattern in terms:
+                for match in pattern.finditer(clause):
+                    prefix = clause[:match.start()]
+                    tail = prefix.split()[-2:]
+                    negated = bool(tail) and tail[-1] in ASPECT_SENTIMENT_NEGATIONS
+                    if len(tail) == 2 and tail[-2] in ASPECT_SENTIMENT_NEGATIONS:
+                        negated = True
+                    polarity = (
+                        ("negative" if base_polarity == "positive" else "positive")
+                        if negated else base_polarity
+                    )
+                    polarities.add(polarity)
+        return polarities
+
     rows = []
     for aspect, keywords in aspect_keywords.items():
         matches = [
             keyword for keyword in keywords
-            if re.sub(r"[\s_]+", " ", keyword.lower()).strip() in normalized
+            if term_occurs(normalized, keyword, aspect)
         ]
         if not matches:
             continue
-        positive = any(term in normalized for term in POSITIVE_ASPECT_TERMS)
-        negative = any(term in normalized for term in NEGATIVE_ASPECT_TERMS)
-        sentiment = (
-            "Hỗn hợp" if positive and negative
-            else "Tiêu cực" if negative
-            else "Tích cực" if positive
-            else "Trung tính"
-        )
+
+        local_polarities = set()
+        for clause in clauses:
+            if any(term_occurs(clause, keyword, aspect) for keyword in matches):
+                local_polarities.update(clause_polarities(clause))
+
+        if local_polarities == {"positive"}:
+            sentiment = "Tích cực"
+        elif local_polarities == {"negative"}:
+            sentiment = "Tiêu cực"
+        elif local_polarities == {"positive", "negative"}:
+            sentiment = "Hỗn hợp"
+        else:
+            sentiment = "Trung tính"
         row_dict = {
             "aspect": aspect,
             "sentiment": sentiment,
@@ -464,7 +635,7 @@ def render_absa_product(view: pd.DataFrame, aspects: dict) -> None:
 def render_absa_matrix(view: pd.DataFrame, aspects: dict) -> None:
     render_page_header(
         title="Ma trận Khía cạnh & Sắc thái cảm xúc (ABSA Matrix)",
-        description="Bóc tách sắc thái cảm xúc chi tiết trên từng thuộc tính: Giá cả, Chất lượng, Giao hàng, Đóng gói, Dịch vụ",
+        description="Bóc tách sắc thái cảm xúc theo 7 khía cạnh: Chất lượng, Giá cả, Thiết kế, Độ bền, Đóng gói, Giao hàng và Dịch vụ",
     )
     valid = valid_rows(view)
     if valid.empty:
@@ -561,25 +732,49 @@ def render_absa_simulator(aspects: dict) -> None:
             labels = labels.iloc[0]
 
             ai_sentiment = None
-            if os.path.exists(MODEL_PATH):
-                try:
-                    model = joblib.load(MODEL_PATH)
-                    seg_text = processed.get("comment_text_segmented") or processed.get("comment_text_clean") or text
-                    pred = model.predict([seg_text])[0]
-                    vn_map = {"negative": "Tiêu cực", "neutral": "Trung tính", "positive": "Tích cực"}
-                    ai_sentiment = vn_map.get(pred, str(pred))
-                except Exception:
-                    ai_sentiment = None
+            candidate_model_not_deployed = False
+            if MODEL_PATH.exists() and MODEL_METADATA_PATH.exists():
+                with open(MODEL_METADATA_PATH, "r", encoding="utf-8") as metadata_file:
+                    model_metadata = json.load(metadata_file)
+                if (
+                    model_metadata.get("label_source") == "manual"
+                    and model_metadata.get("training_dataset_fingerprint")
+                    and model_metadata.get("deployment_ready") is True
+                ):
+                    try:
+                        model = joblib.load(MODEL_PATH)
+                        seg_text = processed.get("comment_text_segmented") or processed.get("comment_text_clean") or text
+                        pred = model.predict([seg_text])[0]
+                        vn_map = {"negative": "Tiêu cực", "neutral": "Trung tính", "positive": "Tích cực"}
+                        ai_sentiment = vn_map.get(pred, str(pred))
+                    except Exception as error:
+                        st.error(f"Không thể tải hoặc chạy mô hình đã huấn luyện: {error}")
+                elif model_metadata.get("label_source") == "manual":
+                    candidate_model_not_deployed = True
 
         st.markdown("##### Kết quả phân tích")
         cols = st.columns(4)
         with cols[0]:
             render_kpi("Cảm xúc cơ sở", str(labels["sentiment_name"]), icon="⭐", delta=f"Theo {rating} sao", tooltip="Phân loại trực tiếp theo số sao")
         with cols[1]:
-            render_kpi("Dự đoán AI (Máy học)", ai_sentiment if ai_sentiment else "Chưa huấn luyện", icon="🤖", delta="Mô hình TF-IDF", tooltip="Dự đoán bởi mô hình máy học đã huấn luyện")
+            model_status = "TF-IDF · đã kiểm định" if ai_sentiment else "Ứng viên nghiên cứu" if candidate_model_not_deployed else "Chưa có model đã kiểm định"
+            render_kpi("Dự đoán AI (Máy học)", ai_sentiment if ai_sentiment else "Chưa sẵn sàng", icon="🤖", delta=model_status, tooltip="Chỉ hiển thị dự đoán khi mô hình vượt qua bước kiểm định triển khai")
+            if candidate_model_not_deployed:
+                st.caption("Mô hình đang lưu là ứng viên nghiên cứu; chưa có test độc lập và chưa được bật cho dự đoán website.")
         with cols[2]:
-            status_txt = "RÁC (SPAM)" if processed["is_spam"] else "HỢP LỆ"
-            render_kpi("Kiểm định lọc rác", status_txt, icon="🛡️", delta=processed.get("spam_reason", "Đạt chuẩn"), delta_type="bad" if processed["is_spam"] else "good")
+            if processed["is_spam"]:
+                status_txt = "RÁC (SPAM)"
+                status_delta = processed.get("spam_reason", "Đạt chuẩn")
+                status_type = "bad"
+            elif processed["low_information"]:
+                status_txt = "HỢP LỆ / ÍT THÔNG TIN"
+                status_delta = processed.get("low_information_reason", "Ít thông tin")
+                status_type = "neutral"
+            else:
+                status_txt = "HỢP LỆ"
+                status_delta = processed.get("spam_reason", "Đạt chuẩn")
+                status_type = "good"
+            render_kpi("Kiểm định lọc rác", status_txt, icon="🛡️", delta=status_delta, delta_type=status_type)
         with cols[3]:
             matched = sum(int(labels[f"aspect_{name}"]) for name in aspects)
             render_kpi("Khía cạnh tìm thấy", f"{matched} khía cạnh", icon="🏷️", delta="Theo từ điển Lexicon")
@@ -766,124 +961,362 @@ def render_risk_explorer(view: pd.DataFrame) -> None:
 # PHÂN HỆ 4: PHÒNG NGHIÊN CỨU & MÔ HÌNH AI
 # ==========================================
 
-def render_research_lab(view: pd.DataFrame) -> None:
+def render_research_lab(view: pd.DataFrame, processed: Optional[pd.DataFrame] = None) -> None:
     render_page_header(
         title="Phòng Thử nghiệm & Đánh giá Mô hình AI (Model Lab)",
-        description="Huấn luyện, tinh chỉnh và so sánh các giải thuật học máy phân loại cảm xúc văn bản với trích xuất đặc trưng TF-IDF",
+        description="So sánh mô hình bằng cross-validation lặp trên dữ liệu nhãn thủ công đã qua audit.",
     )
-    data = valid_rows(view).copy()
-    data["text"] = data.get("comment_text_segmented", data["comment_text_raw"]).fillna("").astype(str)
-    data["label"] = pd.cut(data["rating"], bins=[0, 2, 3, 5], labels=["negative", "neutral", "positive"]).astype(str)
-    data = data[data["label"].isin(["negative", "neutral", "positive"]) & data["text"].str.strip().ne("")]
+    del view, processed
 
-    counts = data["label"].value_counts()
-    if len(data) < 12 or counts.min() < 2:
-        st.warning("Cần tối thiểu 12 đánh giá hợp lệ và ít nhất 2 mẫu cho mỗi lớp cảm xúc để huấn luyện.")
+    if not MANUAL_LABELS_PATH.exists():
+        st.info("Chưa có nhãn thủ công. Hãy gán nhãn trong mục 'Công cụ Gán nhãn Thủ công' trước khi huấn luyện.")
         return
 
-    c_m1, c_m2 = st.columns(2)
-    with c_m1:
-        model_name = st.selectbox("Chọn giải thuật học máy:", ["Hồi quy Logistic (Logistic Regression)", "Máy véc-tơ hỗ trợ (Linear SVM)"])
-    with c_m2:
-        test_size = st.slider("Tỷ lệ tập kiểm thử (Test split):", 0.15, 0.40, 0.25, 0.05)
+    try:
+        data, audit_issues, audit_summary = load_audited_training_data(
+            MANUAL_LABELS_PATH,
+            processed_path=DEFAULT_DATA if DEFAULT_DATA.exists() else None,
+            reference_path=MANUAL_LABELS_REFERENCE_PATH if MANUAL_LABELS_REFERENCE_PATH.exists() else None,
+        )
+    except (OSError, ValueError, KeyError) as exc:
+        st.error(f"Không thể chuẩn bị dữ liệu huấn luyện sau audit: {exc}")
+        return
 
-    if st.button("Bắt đầu Huấn luyện & Đánh giá", type="primary"):
-        with st.spinner("Đang huấn luyện mô hình và tính toán chỉ số đánh giá..."):
-            x_train, x_test, y_train, y_test = train_test_split(
-                data["text"], data["label"], test_size=test_size, random_state=42, stratify=data["label"]
+    counts = data["label"].value_counts().reindex(["negative", "neutral", "positive"], fill_value=0)
+    st.caption(
+        f"Nguồn huấn luyện: {audit_summary['training_samples']:,} mẫu manual hợp lệ · "
+        f"{audit_summary['audit_issue_rows']:,} dòng được ghi nhận trong audit"
+    )
+    st.dataframe(
+        counts.rename(index={"negative": "Tiêu cực", "neutral": "Trung tính", "positive": "Tích cực"})
+        .rename("Số mẫu")
+        .to_frame(),
+        width="content",
+    )
+    if audit_summary.get("class_distribution", {}).get("positive", 0) > max(
+        audit_summary.get("class_distribution", {}).get("negative", 0),
+        audit_summary.get("class_distribution", {}).get("neutral", 0),
+    ) * 3:
+        st.warning(
+            "Tập nhãn đang lệch mạnh về lớp Tích cực. Macro-F1 và recall từng lớp được dùng "
+            "để tránh việc accuracy cao nhưng bỏ sót lớp ít mẫu."
+        )
+    if audit_summary.get("independent_test_available") is False:
+        st.info(
+            "Chưa có tập kiểm thử độc lập đủ điều kiện. Các chỉ số dưới đây là ước lượng phát triển "
+            "từ repeated stratified cross-validation và chưa phải kết quả tổng quát hóa cuối cùng."
+        )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        n_splits = st.slider(
+            "Số fold cross-validation",
+            min_value=2,
+            max_value=5,
+            value=5,
+            step=1,
+            help="Tự động giảm nếu lớp ít mẫu nhất không đủ cho số fold đã chọn.",
+        )
+    with c2:
+        n_repeats = st.slider(
+            "Số lần lặp cross-validation",
+            min_value=1,
+            max_value=5,
+            value=3,
+            step=1,
+        )
+
+    if st.button("Đánh giá và huấn luyện mô hình tốt nhất", type="primary"):
+        with st.spinner("Đang benchmark các mô hình trên dữ liệu đã audit..."):
+            evaluation = evaluate_models(
+                data,
+                n_splits=n_splits,
+                n_repeats=n_repeats,
+                random_state=42,
             )
-            classifier = (
-                LogisticRegression(max_iter=1000, class_weight="balanced")
-                if "Logistic" in model_name
-                else LinearSVC(class_weight="balanced")
+            metadata = train_and_save_best_model(
+                data,
+                evaluation,
+                model_path=MODEL_PATH,
+                metadata_path=MODEL_METADATA_PATH,
+                training_dataset_fingerprint=audit_summary["training_dataset_fingerprint"],
+                audit_summary=audit_summary,
+                random_state=42,
             )
-            model = Pipeline([
-                ("tfidf", TfidfVectorizer(ngram_range=(1, 2), min_df=1, sublinear_tf=True)),
-                ("classifier", classifier),
-            ])
-            model.fit(x_train, y_train)
-            predictions = model.predict(x_test)
-            report = classification_report(y_test, predictions, output_dict=True, zero_division=0)
+            write_evaluation_artifacts(
+                evaluation,
+                output_dir=ROOT / "data" / "processed" / "evaluation",
+                audit_summary=audit_summary,
+                issues=audit_issues,
+            )
+        st.session_state["model_lab_evaluation"] = evaluation
+        st.session_state["model_lab_metadata"] = metadata
+        st.session_state["model_lab_audit_summary"] = audit_summary
+        st.session_state["trained_model"] = joblib.load(MODEL_PATH)
+        st.success(
+            f"Đã benchmark {len(evaluation['models'])} cấu hình và lưu ứng viên mô hình "
+            f"{metadata['model_name']} vào {MODEL_PATH}."
+        )
+        st.warning(
+            "Ứng viên này chưa được bật trong luồng dự đoán website vì chưa có tập test độc lập "
+            "và recall lớp Trung tính còn thấp."
+        )
 
-        st.markdown("##### Các chỉ số đánh giá chất lượng mô hình")
-        metrics = st.columns(4)
-        with metrics[0]:
-            render_kpi("Độ chính xác (Accuracy)", f"{accuracy_score(y_test, predictions):.3f}", icon="🎯", delta="Tập kiểm thử", tooltip="Tỷ lệ đoán đúng trên toàn bộ tập test")
-        with metrics[1]:
-            render_kpi("Độ chuẩn xác (Precision)", f"{report['macro avg']['precision']:.3f}", icon="🔍", delta="Macro Average", tooltip="Độ tin cậy khi gán nhãn")
-        with metrics[2]:
-            render_kpi("Độ bao phủ (Recall)", f"{report['macro avg']['recall']:.3f}", icon="📡", delta="Macro Average", tooltip="Khả năng bắt trúng mẫu của từng lớp")
-        with metrics[3]:
-            f1 = report['macro avg']['f1-score']
-            render_kpi("F1-Score trung bình", f"{f1:.3f}", icon="⚖️", delta="Chỉ số chính", delta_type="good" if f1 >= 0.7 else "neutral", tooltip="Trung bình điều hòa giữa Precision và Recall")
+    evaluation = st.session_state.get("model_lab_evaluation")
+    previous_summary = st.session_state.get("model_lab_audit_summary", {})
+    if evaluation and previous_summary.get("training_dataset_fingerprint") != audit_summary["training_dataset_fingerprint"]:
+        st.info("Tập nhãn đã thay đổi kể từ lần benchmark trước; hãy chạy lại đánh giá để xem chỉ số mới nhất.")
+        evaluation = None
+    if not evaluation:
+        st.caption("Nhấn nút trên để chạy đánh giá reproducible và huấn luyện lại mô hình.")
+        return
 
-        labels = ["negative", "neutral", "positive"]
-        labels_vn = ["Tiêu cực", "Trung tính", "Tích cực"]
-        matrix = pd.DataFrame(confusion_matrix(y_test, predictions, labels=labels), index=labels_vn, columns=labels_vn)
-        
-        st.markdown("##### Ma trận nhầm lẫn (Confusion Matrix)")
-        st.dataframe(matrix, width="stretch")
+    best_name = evaluation["best_model"]
+    best_result = next(item for item in evaluation["models"] if item["name"] == best_name)
+    st.markdown("##### Kết quả benchmark")
+    st.caption(
+        f"Tiêu chí chọn mô hình: {evaluation['selection_metric']} · "
+        f"{evaluation['folds_per_model']} lần đánh giá cho mỗi mô hình "
+        f"({evaluation['n_splits']} fold × {evaluation['n_repeats']} lần lặp) · "
+        "không sử dụng test độc lập"
+    )
+    comparison_rows = []
+    for result in evaluation["models"]:
+        metrics = result["metrics"]
+        comparison_rows.append(
+            {
+                "Mô hình": result["name"],
+                "Thuật toán": result["algorithm"],
+                "Đặc trưng": result["features"],
+                "Accuracy": f"{metrics['accuracy_mean']:.3f} ± {metrics['accuracy_std']:.3f}",
+                "Macro Precision": f"{metrics['macro_precision_mean']:.3f} ± {metrics['macro_precision_std']:.3f}",
+                "Macro Recall": f"{metrics['macro_recall_mean']:.3f} ± {metrics['macro_recall_std']:.3f}",
+                "Macro F1": f"{metrics['macro_f1_mean']:.3f} ± {metrics['macro_f1_std']:.3f}",
+            }
+        )
+    st.dataframe(pd.DataFrame(comparison_rows), width="stretch", hide_index=True)
 
-        os.makedirs("models", exist_ok=True)
-        joblib.dump(model, MODEL_PATH)
-        st.session_state["trained_model"] = model
-        st.success(f"Mô hình đã được huấn luyện và lưu thành công tại `{MODEL_PATH}`! Bạn có thể sang 'Phân tích Khía cạnh' -> Tab 'Mô phỏng' để thử nghiệm dự đoán ngay.")
+    nested = evaluation.get("nested_selection")
+    if nested:
+        nested_metrics = nested["outer_reporting_metrics"]
+        st.markdown("##### Ước lượng nested cross-validation cho mô hình tinh chỉnh")
+        st.caption(
+            f"Outer {nested['outer_splits']} fold × {nested['outer_repeats']} lần lặp; "
+            f"inner {nested['inner_splits']} fold chọn tham số theo Macro-F1. "
+            "Chỉ số outer-fold là ước lượng phát triển, chưa phải kiểm định độc lập."
+        )
+        nested_kpis = st.columns(4)
+        with nested_kpis[0]:
+            render_kpi(
+                "Nested Accuracy",
+                f"{nested_metrics['accuracy_mean']:.3f} ± {nested_metrics['accuracy_std']:.3f}",
+                icon="🎯",
+                delta="Outer CV",
+            )
+        with nested_kpis[1]:
+            render_kpi(
+                "Nested Macro Precision",
+                f"{nested_metrics['macro_precision_mean']:.3f} ± {nested_metrics['macro_precision_std']:.3f}",
+                icon="🔍",
+                delta="Outer CV",
+            )
+        with nested_kpis[2]:
+            render_kpi(
+                "Nested Macro Recall",
+                f"{nested_metrics['macro_recall_mean']:.3f} ± {nested_metrics['macro_recall_std']:.3f}",
+                icon="📡",
+                delta="Outer CV",
+            )
+        with nested_kpis[3]:
+            render_kpi(
+                "Nested Macro F1",
+                f"{nested_metrics['macro_f1_mean']:.3f} ± {nested_metrics['macro_f1_std']:.3f}",
+                icon="⚖️",
+                delta="Outer CV",
+            )
 
+        nested_recall = pd.DataFrame(nested["per_class_recall"]).T.rename(
+            index={"negative": "Tiêu cực", "neutral": "Trung tính", "positive": "Tích cực"},
+            columns={"mean": "Recall trung bình", "std": "Độ lệch chuẩn giữa fold"},
+        )
+        st.markdown("##### Recall theo lớp của mô hình tinh chỉnh")
+        st.dataframe(nested_recall, width="stretch")
+        nested_params = nested["full_data_inner_best_params"]
+        st.caption(
+            f"Tham số được chọn để refit ứng viên cuối: C={nested_params['C']}; "
+            f"class_weight={nested_params['class_weight']} · "
+            "điểm inner CV chỉ dùng chọn tham số, không phải điểm test."
+        )
+        st.warning(
+            "Ứng viên đã lưu nhưng chưa triển khai: recall Trung tính vẫn thấp hoặc biến động lớn "
+            "và chưa có test độc lập."
+        )
 
+    st.markdown(f"##### So sánh repeated CV chưa tinh chỉnh — {best_name}")
+    st.caption(
+        "Các chỉ số ở phần này phục vụ so sánh nhanh cấu hình. Ước lượng nested CV của "
+        "quy trình chọn tham số được báo cáo riêng phía trên."
+    )
+    metrics = best_result["metrics"]
+    kpis = st.columns(4)
+    with kpis[0]:
+        render_kpi("Độ chính xác", f"{metrics['accuracy_mean']:.3f}", icon="🎯", delta="CV trung bình")
+    with kpis[1]:
+        render_kpi("Macro Precision", f"{metrics['macro_precision_mean']:.3f}", icon="🔍", delta="CV trung bình")
+    with kpis[2]:
+        render_kpi("Macro Recall", f"{metrics['macro_recall_mean']:.3f}", icon="📡", delta="CV trung bình")
+    with kpis[3]:
+        render_kpi("Macro F1", f"{metrics['macro_f1_mean']:.3f}", icon="⚖️", delta="CV trung bình")
+
+    labels = ["negative", "neutral", "positive"]
+    labels_vn = ["Tiêu cực", "Trung tính", "Tích cực"]
+    matrix = pd.DataFrame(best_result["confusion_matrix"], index=labels_vn, columns=labels_vn)
+    st.markdown(f"##### Ma trận nhầm lẫn cộng dồn — {best_name}")
+    st.caption("Số lượt dự đoán qua tất cả fold và lần lặp; mỗi mẫu xuất hiện một lần trong mỗi lần lặp.")
+    st.dataframe(matrix, width="stretch")
+
+    per_class = best_result.get("per_class", {})
+    if per_class:
+        class_table = pd.DataFrame(per_class).T.rename(
+            index={"negative": "Tiêu cực", "neutral": "Trung tính", "positive": "Tích cực"}
+        )
+        st.markdown("##### Chỉ số theo từng lớp")
+        st.dataframe(class_table, width="stretch")
+
+    with st.expander("Chi tiết audit dữ liệu"):
+        st.write(
+            f"Fingerprint tập huấn luyện: {audit_summary['training_dataset_fingerprint']}"
+        )
+        if audit_issues.empty:
+            st.success("Không có vấn đề audit cần xem thêm.")
+        else:
+            st.dataframe(audit_issues, width="stretch", hide_index=True)
 def render_research_labeling(view: pd.DataFrame, aspects: dict) -> None:
     render_page_header(
         title="Công cụ Gán nhãn Dữ liệu Thủ công (Active Labeling)",
-        description="Cho phép nhóm nghiên cứu gán nhãn thủ công để tạo lập tập kiểm thử vàng (Gold Standard) phục vụ đánh giá",
+        description="Gán nhãn cảm xúc cho đánh giá đã crawl từ sàn; các mẫu đã gán được ẩn theo mặc định.",
     )
-    valid = valid_rows(view)
-    if valid.empty:
-        render_empty_state("Chưa có đánh giá", "Không có đánh giá hợp lệ để gán nhãn.")
-        return
-
     if "manual_labels" not in st.session_state:
-        st.session_state.manual_labels = []
+        labels_df = load_manual_labels()
+        st.session_state.manual_labels = (
+            labels_df.to_dict(orient="records") if not labels_df.empty else []
+        )
 
-    review_ids = valid["review_id"].astype(str).tolist()
-    review_id = st.selectbox("Chọn mã đánh giá cần gán nhãn:", review_ids)
-    row = valid[valid["review_id"].astype(str) == review_id].iloc[0]
-
-    prod_name = row.get("product_name", "N/A")
-    cat_name = row.get("category", "N/A")
-    star = row.get("rating", "N/A")
-    user = row.get("reviewer_name", "Khách hàng ẩn danh")
-    likes = row.get("like_count", 0)
-
-    st.markdown(
-        f'<div class="info-strip">'
-        f'  <span>📦 <b>Sản phẩm:</b> {prod_name}</span>'
-        f'  <span>📁 <b>Ngành hàng:</b> {cat_name}</span>'
-        f'  <span>⭐ <b>Số sao:</b> {star}★</span>'
-        f'  <span>👤 <b>Khách hàng:</b> {user} ({likes} 👍)</span>'
-        f'</div>',
-        unsafe_allow_html=True,
+    manual_labels = st.session_state.manual_labels
+    show_labeled = st.checkbox(
+        "Hiện cả bình luận đã gán nhãn (để xem/sửa)",
+        value=False,
+        key="show_labeled_manual_reviews",
     )
-    st.info(f"Nội dung nhận xét: \"{row.get('comment_text_raw', '')}\"")
+    candidates = manual_label_candidates(view, manual_labels, show_labeled)
+    remaining_count = len(manual_label_candidates(view, manual_labels))
+    st.caption(
+        f"Còn {remaining_count:,} bình luận đã crawl chưa gán nhãn."
+    )
 
-    with st.form("manual_label_form"):
-        sentiment = st.selectbox("Nhãn cảm xúc chuẩn xác:", ["Tiêu cực", "Trung tính", "Tích cực"])
-        selected_aspects = st.multiselect("Các khía cạnh đề cập trong câu:", list(aspects.keys()), format_func=lambda v: v.title())
-        submitted = st.form_submit_button("Lưu nhãn đánh giá này")
+    if candidates.empty:
+        if show_labeled:
+            st.info("Không có bình luận đã crawl phù hợp với bộ lọc hiện tại.")
+        else:
+            st.info("Không còn bình luận đã crawl chưa gán nhãn trong bộ lọc hiện tại.")
+    else:
+        candidates = candidates.copy()
+        candidates["_review_key"] = candidates.apply(
+            lambda candidate: _review_label_key(
+                candidate.get("platform", ""), candidate.get("review_id", "")
+            ),
+            axis=1,
+        )
+        review_keys = candidates["_review_key"].tolist()
+        review_key = st.selectbox(
+            "Chọn mã đánh giá cần gán nhãn:",
+            review_keys,
+            format_func=lambda key: f"{key[0] or 'không rõ nền tảng'} · {key[1]}",
+        )
+        row = candidates[candidates["_review_key"] == review_key].iloc[0]
+        review_id = str(row.get("review_id", "")).strip()
+        platform = str(row.get("platform", "")).strip()
+        existing_label = _find_manual_label(manual_labels, platform, review_id)
 
-    if submitted:
-        record = {
-            "review_id": review_id,
-            "product_name": prod_name,
-            "category": cat_name,
-            "rating": star,
-            "text": str(row.get("comment_text_raw", "")),
-            "sentiment_manual": sentiment,
-            "aspects_manual": ", ".join(selected_aspects),
-        }
-        st.session_state.manual_labels = [
-            item for item in st.session_state.manual_labels if item["review_id"] != review_id
+        prod_name = row.get("product_name", "N/A")
+        cat_name = row.get("category", "N/A")
+        user = row.get("reviewer_name", "Khách hàng ẩn danh")
+        likes = row.get("like_count", 0)
+
+        st.markdown(
+            f'<div class="info-strip">'
+            f'  <span>📦 <b>Sản phẩm:</b> {prod_name}</span>'
+            f'  <span>📁 <b>Ngành hàng:</b> {cat_name}</span>'
+            f'  <span>👤 <b>Khách hàng:</b> {user} ({likes} 👍)</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        st.info(f"Nội dung nhận xét: \"{row.get('comment_text_raw', '')}\"")
+
+        sentiment_options = ["Chọn nhãn", "Tiêu cực", "Trung tính", "Tích cực"]
+        existing_sentiment = (
+            existing_label.get("sentiment_manual") if existing_label else None
+        )
+        sentiment_index = (
+            sentiment_options.index(existing_sentiment)
+            if existing_sentiment in sentiment_options
+            else 0
+        )
+        existing_aspects_value = (
+            str(existing_label.get("aspects_manual", "")) if existing_label else ""
+        )
+        existing_aspects = [
+            aspect.strip()
+            for aspect in existing_aspects_value.split(",")
+            if aspect.strip() in aspects
         ]
-        st.session_state.manual_labels.append(record)
-        st.success(f"Đã lưu nhãn cho đánh giá {review_id}!")
+
+        with st.form("manual_label_form"):
+            sentiment = st.selectbox(
+                "Nhãn cảm xúc chuẩn xác:",
+                sentiment_options,
+                index=sentiment_index,
+            )
+            selected_aspects = st.multiselect(
+                "Các khía cạnh đề cập trong câu:",
+                list(aspects.keys()),
+                default=existing_aspects,
+                format_func=lambda value: value.title(),
+            )
+            submitted = st.form_submit_button(
+                "Cập nhật nhãn" if existing_label else "Lưu nhãn đánh giá này"
+            )
+
+        if submitted:
+            if sentiment == "Chọn nhãn":
+                st.error("Hãy chọn nhãn cảm xúc trước khi lưu.")
+                st.stop()
+            raw_text = str(row.get("comment_text_raw", ""))
+            processed_label = PreprocessingPipeline().process_single_text(raw_text)
+            record = {
+                "review_id": review_id,
+                "platform": platform,
+                "product_name": prod_name,
+                "category": cat_name,
+                # Keep rating as metadata for later audit, but never show it
+                # while an annotator decides sentiment from the review text.
+                "rating": row.get("rating", ""),
+                "text": raw_text,
+                "text_model": processed_label.get("comment_text_segmented") or raw_text,
+                "sentiment_manual": sentiment,
+                "aspects_manual": ", ".join(selected_aspects),
+                "sentiment_source": "manual",
+                "labelled_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            st.session_state.manual_labels = [
+                label for label in st.session_state.manual_labels
+                if _review_label_key(label.get("platform", ""), label.get("review_id", ""))
+                != _review_label_key(platform, review_id)
+            ]
+            st.session_state.manual_labels.append(record)
+            save_manual_labels(st.session_state.manual_labels)
+            st.session_state.pop("model_lab_evaluation", None)
+            st.success(f"Đã lưu nhãn cho đánh giá {review_id}!")
 
     labels_df = pd.DataFrame(st.session_state.manual_labels)
     if not labels_df.empty:
@@ -1515,7 +1948,7 @@ def main() -> None:
             ":material/description: Báo cáo Khoa học Tổng hợp",
         ])
         with tab1:
-            render_research_lab(view)
+            render_research_lab(view, df)
         with tab2:
             render_research_labeling(view, aspects)
         with tab3:
@@ -1531,7 +1964,7 @@ def main() -> None:
             ":material/description: Báo cáo Khoa học Tổng hợp",
         ])
         with tab1:
-            render_research_lab(view)
+            render_research_lab(view, df)
         with tab2:
             render_research_labeling(view, aspects)
         with tab3:
