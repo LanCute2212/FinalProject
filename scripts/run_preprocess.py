@@ -9,6 +9,7 @@ import pandas as pd
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.preprocessing.pipeline import PreprocessingPipeline
+from src.storage.sql_server_store import SQLServerStore, sqlserver_is_configured
 from src.utils.logger import get_logger
 
 logger = get_logger("run_preprocess")
@@ -58,11 +59,15 @@ def load_all_raw_data(raw_dir: str = "data/raw") -> pd.DataFrame:
         missing_ids = review_ids.isna() | review_ids.str.lower().isin({"", "nan", "none", "null", "n/a"})
         review_ids = review_ids.mask(missing_ids, pd.NA)
         combined_df["review_id"] = review_ids
-        duplicate_keys = pd.DataFrame(index=combined_df.index)
+        identity_columns = []
         if "platform" in combined_df.columns:
-            duplicate_keys["platform"] = (
-                combined_df["platform"].astype("string").fillna("").str.strip().str.lower()
-            )
+            combined_df["platform"] = combined_df["platform"].astype("string").fillna("").str.strip().str.lower()
+            identity_columns.append("platform")
+        if "product_id" in combined_df.columns:
+            combined_df["product_id"] = combined_df["product_id"].astype("string").fillna("").str.strip()
+            identity_columns.append("product_id")
+        identity_columns.append("review_id")
+        duplicate_keys = combined_df[identity_columns].copy()
         duplicate_keys["review_id"] = review_ids.fillna("")
         duplicate_mask = duplicate_keys.duplicated(keep="last") & ~missing_ids
         dedup_count = int(duplicate_mask.sum())
@@ -184,7 +189,13 @@ def display_statistics(df: pd.DataFrame):
         print(f" • TÁCH TỪ (SEGMENT): {row['comment_text_segmented']}")
     print("\n" + "="*70 + "\n")
 
-def run_full_preprocessing(raw_dir: str = "data/raw", input_file: str = None, output_path: str = "data/processed/reviews_processed.csv") -> pd.DataFrame:
+def run_full_preprocessing(
+    raw_dir: str = "data/raw",
+    input_file: str = None,
+    output_path: str = "data/processed/reviews_processed.csv",
+    sync_sql_server: bool = True,
+    show_statistics: bool = True,
+) -> pd.DataFrame:
     """Hàm chạy toàn diện tiền xử lý dữ liệu từ tất cả raw files hoặc file chỉ định."""
     pipeline = PreprocessingPipeline()
     
@@ -200,7 +211,14 @@ def run_full_preprocessing(raw_dir: str = "data/raw", input_file: str = None, ou
         processed_df.to_csv(output_path, index=False, encoding="utf-8-sig")
         logger.info(f"Đã lưu kết quả gộp vào: {output_path}")
 
-    display_statistics(processed_df)
+    if sync_sql_server and sqlserver_is_configured():
+        with SQLServerStore() as store:
+            store.ping()
+            upserted = store.upsert_reviews(processed_df.to_dict("records"))
+        logger.info(f"Đã đồng bộ {upserted} review đã xử lý vào SQL Server.")
+
+    if show_statistics:
+        display_statistics(processed_df)
     return processed_df
 
 def main():
@@ -208,9 +226,15 @@ def main():
     parser.add_argument("--input", type=str, default=None, help="Đường dẫn file raw CSV/JSON đầu vào (nếu bỏ trống sẽ gộp tất cả)")
     parser.add_argument("--raw_dir", type=str, default="data/raw", help="Thư mục raw data")
     parser.add_argument("--output", type=str, default="data/processed/reviews_processed.csv", help="Đường dẫn lưu file sạch")
+    parser.add_argument("--csv_only", action="store_true", help="Chỉ xuất CSV, không đồng bộ SQL Server")
 
     args = parser.parse_args()
-    run_full_preprocessing(raw_dir=args.raw_dir, input_file=args.input, output_path=args.output)
+    run_full_preprocessing(
+        raw_dir=args.raw_dir,
+        input_file=args.input,
+        output_path=args.output,
+        sync_sql_server=not args.csv_only,
+    )
 
 if __name__ == "__main__":
     main()

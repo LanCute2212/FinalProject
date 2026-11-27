@@ -28,11 +28,15 @@ e:\Đồ án\
 │   │   ├── spam_detector.py     # Lọc review săn xu, câu mặc định & review trùng lặp (BR12)
 │   │   ├── tokenizer.py         # Phân đoạn từ tiếng Việt (underthesea / pyvi)
 │   │   └── pipeline.py          # Pipeline tổng hợp xuất DataFrame
+│   ├── storage/
+│   │   └── sql_server_store.py  # Lưu products, reviews và crawl_runs
 │   └── utils/
 │       └── logger.py            # Logger định dạng chuẩn
 ├── scripts/
 │   ├── generate_sample_data.py  # Sinh dữ liệu mẫu giả lập chuẩn TMĐT (500 reviews, 5 SKU)
 │   ├── run_crawl.py             # CLI cào dữ liệu từ Tiki / Shopee
+│   ├── import_csv_to_sql_server.py # Import review từ CSV vào SQL Server
+│   ├── export_sql_server_to_csv.py # Export review SQL Server sang CSV
 │   ├── run_eda.py               # EDA rating, độ dài, nghịch lý sao-text, aspect coverage
 │   ├── run_features.py          # Tạo nhãn sentiment, aspect labels và TF-IDF baseline
 │   └── run_preprocess.py        # CLI chạy tiền xử lý & in báo cáo thống kê định lượng
@@ -45,6 +49,7 @@ e:\Đồ án\
 ## 2. Hướng dẫn sử dụng nhanh
 
 Môi trường đã được cấu hình sẵn tại `.venv` (Python 3.11).
+Các danh sách chọn trong dashboard có ô tìm kiếm ngay bên dưới; ô tìm kiếm hỗ trợ từ khóa tiếng Việt không dấu.
 
 ### 2.1. Sinh dữ liệu mẫu & chạy thử nghiệm ngay lập tức
 
@@ -81,7 +86,45 @@ Nếu nhóm đã có file CSV tự cào trước đó, chỉ cần chạy:
 ```powershell
 & ".\.venv\Scripts\python.exe" "scripts\run_preprocess.py" --input "đường_dẫn_file_của_nhóm.csv" --output "data\processed\reviews_processed.csv"
 ```
-*(File CSV chỉ cần có cột nội dung đánh giá: `comment_text` hoặc `review_text`)*
+*(File CSV đầu vào cần có cột nội dung đánh giá `comment_text`.)*
+
+### 2.4. SQL Server (CSV vẫn được giữ)
+
+SQL Server lưu riêng thông tin sản phẩm (`products`), từng review (`reviews`) và mỗi lần chạy crawler (`crawl_runs`). Review được định danh theo bộ `platform + product_id + review_id`; crawl và tiền xử lý vẫn giữ các file CSV/JSON hiện tại. Máy cần có SQL Server đang chạy và ODBC Driver 17 for SQL Server. Trước khi chạy, dùng SSMS bằng tài khoản quản trị SQL Server để:
+
+1. Kết nối SSMS tới đúng SQL Server instance đã cấu hình ở `SQLSERVER_SERVER` (mặc định `localhost`) và tạo database `customer_voice_analytics`.
+2. Trong PowerShell chạy ứng dụng, dùng `whoami` để xác định Windows principal; thêm đúng principal đó thành server login trong **Security → Logins** (không chỉ tạo database user).
+3. Trong **User Mapping**, ánh xạ login vào `customer_voice_analytics` với role `db_owner`.
+
+Ứng dụng dùng Windows Authentication; role `db_owner` chỉ cần trên database này để khởi tạo bảng/index và đọc/ghi dữ liệu. Không cần gửi mật khẩu qua ứng dụng.
+
+```powershell
+$env:SQLSERVER_SERVER = "localhost"
+$env:SQLSERVER_DATABASE = "customer_voice_analytics"
+$env:SQLSERVER_DRIVER = "ODBC Driver 17 for SQL Server"
+```
+
+Sau khi cài dependencies từ `requirements.txt`, có thể import bộ processed CSV sẵn có hoặc export reviews về CSV:
+
+```powershell
+& ".\.venv\Scripts\python.exe" "scripts\import_csv_to_sql_server.py"
+& ".\.venv\Scripts\python.exe" "scripts\export_sql_server_to_csv.py" --output "data\exports\reviews.csv"
+```
+
+Khi đã cấu hình `SQLSERVER_SERVER`, CLI crawler và preprocessing sẽ đồng bộ review sang SQL Server đồng thời vẫn ghi CSV/JSON. Dùng `--csv_only` để chạy riêng bằng CSV. Dashboard luôn đọc và ghi dữ liệu vận hành vào SQL Server, đồng thời crawler vẫn lưu raw CSV/JSON và tiền xử lý vẫn xuất processed CSV. Cấu hình kết nối qua biến môi trường; lựa chọn backend không xuất hiện trong giao diện. Lỗi kết nối SQL Server sẽ được báo rõ, không tự chuyển nguồn dữ liệu.
+
+### 2.5. Gán nhãn thủ công để chuẩn bị tập đánh giá
+
+Khởi động Dashboard:
+```powershell
+& ".\.venv\Scripts\python.exe" -m streamlit run app.py
+```
+
+Trong **Phòng Nghiên cứu & Mô hình AI** → **Công cụ Gán nhãn Dữ liệu Thủ công**, chọn review và gán sentiment/aspect theo nội dung. Nhãn được lưu tại `data/processed/manual_labels.csv`, phân biệt review bằng nền tảng và mã review; có thể tải CSV từ giao diện. Nên gán nhãn cân bằng giữa ba lớp cảm xúc và không dùng nhãn suy ra từ rating làm nhãn đánh giá độc lập.
+
+### 2.6. Khám phá và duyệt từ khóa Aspect
+
+Trong **Phân tích Khía cạnh Sản phẩm (ABSA)** → **Khám phá từ khóa Aspect**, hệ thống gom các unigram/bigram/trigram chưa có trong `aspect_keywords.json` theo số review hợp lệ có chứa cụm từ. Xem review mẫu, chọn aspect hiện có hoặc tạo mã aspect mới; keyword chỉ được thêm sau khi xác nhận. Candidate bị bỏ qua được lưu tại `data/processed/aspect_candidates_ignored.json`. Đây là gợi ý dựa trên tần suất, không phải kết quả phân loại ngữ nghĩa tự động.
 
 ---
 

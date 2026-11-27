@@ -23,6 +23,7 @@ class BaseCrawler(ABC):
     def __init__(self, platform_name: str):
         self.platform_name = platform_name
         self.reviews: List[Dict[str, Any]] = []
+        self.product_info: Dict[str, Any] = {}
 
     @abstractmethod
     def fetch_product_reviews(
@@ -95,7 +96,7 @@ class BaseCrawler(ABC):
         Lưu dữ liệu cào được thành CSV và JSON (BR11).
         Quy tắc:
         - Mỗi nền tảng/sàn lưu cố định vào 1 file duy nhất: <platform>_raw.csv và <platform>_raw.json.
-        - Tự động gộp (append) với dữ liệu cũ và loại bỏ trùng lặp theo review_id.
+        - Tự động gộp (append) với dữ liệu cũ và loại trùng theo platform, product_id, review_id.
         """
         os.makedirs(output_dir, exist_ok=True)
         if not self.reviews:
@@ -120,10 +121,19 @@ class BaseCrawler(ABC):
                         existing_df[col] = default_val
 
                 merged_df = pd.concat([existing_df, new_df], ignore_index=True)
+                if "platform" not in merged_df.columns:
+                    merged_df["platform"] = self.platform_name
                 if "review_id" in merged_df.columns:
                     merged_df["review_id"] = merged_df["review_id"].astype(str)
                     before_dedup = len(merged_df)
-                    merged_df = merged_df.drop_duplicates(subset=["review_id"], keep="last")
+                    identity_columns = [
+                        column for column in ("platform", "product_id", "review_id")
+                        if column in merged_df.columns
+                    ]
+                    merged_df = merged_df.drop_duplicates(
+                        subset=identity_columns or ["review_id"],
+                        keep="last",
+                    )
                     dedup_count = before_dedup - len(merged_df)
                     if dedup_count > 0:
                         logger.info(f"Đã khử {dedup_count} review bị trùng lặp.")
@@ -160,3 +170,4 @@ class BaseCrawler(ABC):
     def reset(self) -> None:
         """Xóa dữ liệu phiên hiện tại trước khi bắt đầu một lần cào mới."""
         self.reviews.clear()
+        self.product_info.clear()

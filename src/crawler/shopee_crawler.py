@@ -43,6 +43,13 @@ class ShopeeCrawler(BaseCrawler):
         """
         self.reset()
         logger.info(f"Bắt đầu cào Shopee: Shop ID {shop_id}, Item ID {product_id}, Tên: [{product_name}], Danh mục: [{category}]")
+        self.product_info = {
+            "platform": self.platform_name,
+            "shop_id": str(shop_id),
+            "product_id": str(product_id),
+            "product_name": str(product_name),
+            "category": str(category),
+        }
         
         offset = 0
         limit = 20

@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -22,7 +23,15 @@ from typing import Dict, List, Optional, Tuple
 import joblib
 import pandas as pd
 import streamlit as st
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.svm import LinearSVC
+
 from scripts.run_eda import build_report, load_aspects
+from src.features.aspect_discovery import discover_aspect_candidates, normalize_phrase
 from src.features.feature_engineering import FeatureEngineeringPipeline
 from src.modeling.sentiment_evaluation import (
     evaluate_models,
@@ -31,6 +40,7 @@ from src.modeling.sentiment_evaluation import (
     write_evaluation_artifacts,
 )
 from src.preprocessing.pipeline import PreprocessingPipeline
+from src.storage.sql_server_store import DEFAULT_DATABASE_NAME, SQLServerStore
 
 # Import Design System & Chart Modules
 import ui.charts as charts
@@ -39,11 +49,17 @@ import ui.charts as charts
 ROOT = Path(__file__).parent
 DEFAULT_DATA = ROOT / "data" / "processed" / "reviews_processed.csv"
 ASPECT_DATA = ROOT / "data" / "dictionaries" / "aspect_keywords.json"
+ASPECT_CANDIDATES_IGNORED_PATH = ROOT / "data" / "processed" / "aspect_candidates_ignored.json"
 MODEL_PATH = ROOT / "models" / "sentiment_model.joblib"
 MODEL_METADATA_PATH = ROOT / "models" / "sentiment_model_metadata.json"
-CSS_PATH = ROOT / "ui" / "style.css"
-MANUAL_LABELS_PATH = ROOT / "data" / "processed" / "manual_labels.csv"
 MANUAL_LABELS_REFERENCE_PATH = ROOT / "data" / "processed" / "manual_labels_test.csv"
+MANUAL_LABELS_PATH = ROOT / "data" / "processed" / "manual_labels.csv"
+MANUAL_LABEL_COLUMNS = [
+    "review_id", "platform", "product_name", "category", "rating", "text",
+    "text_model", "sentiment_manual", "aspects_manual", "sentiment_source",
+    "labelled_at", "annotated_at",
+]
+CSS_PATH = ROOT / "ui" / "style.css"
 
 # ==============================================================================
 # CẤU HÌNH TRANG VÀ NẠP CSS DESIGN SYSTEM
@@ -64,23 +80,79 @@ if CSS_PATH.exists():
 # HÀM BỔ TRỢ HỆ THỐNG & CACHING DỮ LIỆU
 # ==============================================================================
 
-def get_file_mtime(path: str) -> float:
-    try:
-        return os.path.getmtime(path)
-    except OSError:
-        return 0.0
-
-
-@st.cache_data(show_spinner=False)
-def load_data(path: str, mtime: float) -> pd.DataFrame:
+@st.cache_data(show_spinner=False, ttl=30)
+def load_data(
+    path: str,
+    mtime: float,
+    data_source: str = "SQL Server",
+    sql_server: str = "localhost",
+    database_name: str = DEFAULT_DATABASE_NAME,
+) -> pd.DataFrame:
     del mtime
-    frame = pd.read_csv(path)
-    frame["rating"] = pd.to_numeric(frame["rating"], errors="coerce").fillna(0).astype(int)
-    frame["created_at"] = pd.to_datetime(frame["created_at"], errors="coerce")
+    if data_source == "SQL Server":
+        with SQLServerStore(
+            server=sql_server,
+            database_name=database_name,
+        ) as store:
+            store.ping()
+            frame = store.load_reviews_dataframe()
+    else:
+        frame = pd.read_csv(path)
+    if "rating" in frame.columns:
+        frame["rating"] = pd.to_numeric(frame["rating"], errors="coerce").fillna(0).astype(int)
+    if "created_at" in frame.columns:
+        frame["created_at"] = pd.to_datetime(frame["created_at"], errors="coerce")
     return frame
 
 
-@st.cache_data(show_spinner=False)
+def load_manual_labels(path: Path = MANUAL_LABELS_PATH) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame(columns=MANUAL_LABEL_COLUMNS)
+    labels = pd.read_csv(path, dtype={"review_id": str, "platform": str})
+    labels = labels.copy()
+    for column in MANUAL_LABEL_COLUMNS:
+        if column not in labels.columns:
+            labels[column] = ""
+    labels["sentiment_source"] = labels["sentiment_source"].where(
+        labels["sentiment_source"].astype(str).str.strip().ne(""),
+        labels["sentiment_manual"].map(lambda value: "manual" if str(value).strip() else ""),
+    )
+    labels["text_model"] = labels["text_model"].where(
+        labels["text_model"].astype(str).str.strip().ne(""), labels["text"]
+    )
+    labels["labelled_at"] = labels["labelled_at"].where(
+        labels["labelled_at"].astype(str).str.strip().ne(""), labels["annotated_at"]
+    )
+    labels["annotated_at"] = labels["annotated_at"].where(
+        labels["annotated_at"].astype(str).str.strip().ne(""), labels["labelled_at"]
+    )
+    return labels[MANUAL_LABEL_COLUMNS]
+
+
+def save_manual_labels(labels, path: Path = MANUAL_LABELS_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(labels, list):
+        labels = pd.DataFrame(labels)
+    labels = labels.copy()
+    for column in MANUAL_LABEL_COLUMNS:
+        if column not in labels.columns:
+            labels[column] = ""
+    labels["sentiment_source"] = labels["sentiment_source"].where(
+        labels["sentiment_source"].astype(str).str.strip().ne(""),
+        labels["sentiment_manual"].map(lambda value: "manual" if str(value).strip() else ""),
+    )
+    labels["text_model"] = labels["text_model"].where(
+        labels["text_model"].astype(str).str.strip().ne(""), labels["text"]
+    )
+    labels["labelled_at"] = labels["labelled_at"].where(
+        labels["labelled_at"].astype(str).str.strip().ne(""), labels["annotated_at"]
+    )
+    labels["annotated_at"] = labels["annotated_at"].where(
+        labels["annotated_at"].astype(str).str.strip().ne(""), labels["labelled_at"]
+    )
+    labels[MANUAL_LABEL_COLUMNS].to_csv(path, index=False, encoding="utf-8-sig")
+
+
 def cached_build_report(frame: pd.DataFrame, aspects: Dict[str, List[str]]) -> Tuple[pd.DataFrame, Dict]:
     return build_report(frame, aspects)
 
@@ -174,19 +246,101 @@ def misclassified_test_rows(
     })
 
 
-def load_manual_labels() -> pd.DataFrame:
-    if not MANUAL_LABELS_PATH.exists():
-        return pd.DataFrame()
-    return pd.read_csv(MANUAL_LABELS_PATH, encoding="utf-8-sig")
-
-
-def save_manual_labels(labels: List[dict]) -> None:
-    MANUAL_LABELS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(labels).to_csv(
-        MANUAL_LABELS_PATH,
-        index=False,
-        encoding="utf-8-sig",
+def _search_normalize(value: object) -> str:
+    normalized = unicodedata.normalize("NFD", str(value).casefold())
+    without_marks = "".join(
+        character for character in normalized
+        if unicodedata.category(character) != "Mn"
     )
+    return without_marks.replace("đ", "d")
+
+
+def searchable_selectbox(
+    label: str,
+    options: list,
+    key: str,
+    format_func=None,
+    container=None,
+):
+    target = container if container is not None else st
+    choices = list(options)
+    if not choices:
+        target.info(f"Không có lựa chọn cho “{label.rstrip(':')}”.")
+        return None
+
+    search_key = f"{key}_search"
+    query = st.session_state.get(search_key, "")
+    query_normalized = _search_normalize(query.strip())
+    filtered = [
+        option for option in choices
+        if query_normalized in _search_normalize(
+            format_func(option) if format_func else option
+        )
+    ]
+    if not filtered:
+        target.info(f"Không tìm thấy lựa chọn phù hợp với “{query}”.")
+        target.text_input(
+            f"Tìm kiếm {label.rstrip(':')}",
+            placeholder="Nhập để lọc lựa chọn...",
+            key=search_key,
+        )
+        return None
+
+    selection_key = f"{key}_selection"
+    if selection_key not in st.session_state or st.session_state[selection_key] not in choices:
+        st.session_state[selection_key] = choices[0]
+    selected = st.session_state[selection_key]
+    if selected not in filtered:
+        filtered.insert(0, selected)
+    widget_options = {"key": selection_key}
+    if format_func is not None:
+        widget_options["format_func"] = format_func
+    selected = target.selectbox(label, filtered, **widget_options)
+    target.text_input(
+        f"Tìm kiếm {label.rstrip(':')}",
+        placeholder="Nhập để lọc lựa chọn...",
+        key=search_key,
+    )
+    return selected
+
+
+def searchable_multiselect(
+    label: str,
+    options: list,
+    default: list,
+    key: str,
+    format_func=None,
+    container=None,
+):
+    target = container if container is not None else st
+    choices = list(options)
+    if key not in st.session_state:
+        st.session_state[key] = list(default)
+
+    search_key = f"{key}_search"
+    query = st.session_state.get(search_key, "")
+    query_normalized = _search_normalize(query.strip())
+    filtered = [
+        option for option in choices
+        if query_normalized in _search_normalize(
+            format_func(option) if format_func else option
+        )
+    ]
+    selected = list(st.session_state.get(key, []))
+    visible = list(filtered)
+    visible.extend(option for option in selected if option not in visible)
+    widget_options = {"key": key}
+    if format_func is not None:
+        widget_options["format_func"] = format_func
+    selected_values = target.multiselect(label, visible, **widget_options)
+    if not filtered:
+        target.caption(f"Không tìm thấy lựa chọn phù hợp với “{query}”.")
+    target.text_input(
+        f"Tìm kiếm {label.rstrip(':')}",
+        placeholder="Nhập để lọc lựa chọn...",
+        key=search_key,
+    )
+    return selected_values
 
 
 def sentiment_label_vn(rating: pd.Series) -> pd.Series:
@@ -208,7 +362,9 @@ def sentiment_summary(frame: pd.DataFrame) -> pd.DataFrame:
 
 POSITIVE_ASPECT_TERMS = ("tốt", "hay", "đẹp", "nhanh", "ổn", "hài lòng", "ưng ý", "mượt", "đáng tiền", "chuẩn", "chính hãng")
 NEGATIVE_ASPECT_TERMS = ("lỗi", "hỏng", "chậm", "tệ", "thất vọng", "móp", "trầy", "đắt", "kém", "chập chờn", "kém chất lượng")
+
 ASPECT_SENTIMENT_NEGATIONS = ("không", "chẳng", "chả", "chưa", "ko", "khum", "hông")
+
 ASPECT_CONTRAST_MARKERS = ("nhưng", "tuy nhiên", "song", "trái lại", "ngược lại")
 
 
@@ -307,6 +463,7 @@ def build_aspect_sentiment_rows(text: str, aspect_keywords: dict, meta: dict = N
             row_dict.update(meta)
         rows.append(row_dict)
     return rows
+
 
 
 # ==============================================================================
@@ -553,7 +710,13 @@ def render_absa_product(view: pd.DataFrame, aspects: dict) -> None:
         return
 
     product_names = sorted(view["product_name"].dropna().astype(str).unique())
-    selected_product = st.selectbox("Chọn sản phẩm cần phân tích:", product_names)
+    selected_product = searchable_selectbox(
+        "Chọn sản phẩm cần phân tích:",
+        product_names,
+        key="absa_product",
+    )
+    if selected_product is None:
+        return
     selected = view[view["product_name"].astype(str) == selected_product]
 
     # FIX LỖI selected.get("is_valid_for_analysis", True).astype(bool) KHI THIẾU CỘT
@@ -604,7 +767,13 @@ def render_absa_product(view: pd.DataFrame, aspects: dict) -> None:
     st.markdown("##### Danh sách đánh giá tiêu biểu của sản phẩm")
     c_sort, _ = st.columns([2, 2])
     with c_sort:
-        sort_p = st.selectbox("Sắp xếp đánh giá:", ["Nhiều lượt thích nhất (Hữu ích)", "Rating thấp nhất (1–2★)", "Rating cao nhất (5★)", "Mới nhất"])
+        sort_p = searchable_selectbox(
+            "Sắp xếp đánh giá:",
+            ["Nhiều lượt thích nhất (Hữu ích)", "Rating thấp nhất (1–2★)", "Rating cao nhất (5★)", "Mới nhất"],
+            key="absa_review_sort",
+        )
+    if sort_p is None:
+        return
 
     prod_reviews = selected.copy()
     if sort_p == "Nhiều lượt thích nhất (Hữu ích)" and "like_count" in prod_reviews.columns:
@@ -635,7 +804,7 @@ def render_absa_product(view: pd.DataFrame, aspects: dict) -> None:
 def render_absa_matrix(view: pd.DataFrame, aspects: dict) -> None:
     render_page_header(
         title="Ma trận Khía cạnh & Sắc thái cảm xúc (ABSA Matrix)",
-        description="Bóc tách sắc thái cảm xúc theo 7 khía cạnh: Chất lượng, Giá cả, Thiết kế, Độ bền, Đóng gói, Giao hàng và Dịch vụ",
+        description="Bóc tách sắc thái cảm xúc chi tiết trên từng thuộc tính: Giá cả, Chất lượng, Giao hàng, Đóng gói, Dịch vụ",
     )
     valid = valid_rows(view)
     if valid.empty:
@@ -672,9 +841,19 @@ def render_absa_matrix(view: pd.DataFrame, aspects: dict) -> None:
     st.markdown("##### Khám phá chi tiết các ý kiến theo khía cạnh")
     c_asp, c_sent = st.columns(2)
     with c_asp:
-        selected_aspects = st.multiselect("Lọc khía cạnh:", list(counts.index), default=[])
+        selected_aspects = searchable_multiselect(
+            "Lọc khía cạnh:",
+            list(counts.index),
+            default=[],
+            key="absa_matrix_aspects",
+        )
     with c_sent:
-        selected_sent = st.multiselect("Lọc sắc thái:", ["Tiêu cực", "Trung tính", "Hỗn hợp", "Tích cực"], default=[])
+        selected_sent = searchable_multiselect(
+            "Lọc sắc thái:",
+            ["Tiêu cực", "Trung tính", "Hỗn hợp", "Tích cực"],
+            default=[],
+            key="absa_matrix_sentiments",
+        )
 
     filtered_res = result.copy()
     if selected_aspects:
@@ -696,6 +875,168 @@ def render_absa_matrix(view: pd.DataFrame, aspects: dict) -> None:
     st.dataframe(filtered_res[show_cols], column_config=col_configs, width="stretch", hide_index=True)
 
 
+def render_aspect_discovery(view: pd.DataFrame, aspects: dict) -> None:
+    render_page_header(
+        title="Khám phá từ khóa Aspect",
+        description="Tìm cụm từ tiềm năng chưa có trong từ điển; bạn duyệt mẫu review và quyết định aspect trước khi thêm.",
+    )
+    if "aspect_discovery_notice" in st.session_state:
+        st.success(st.session_state.pop("aspect_discovery_notice"))
+
+    st.caption(
+        "Candidate được tìm bằng tần suất n-gram trên review hợp lệ; đây là gợi ý từ khóa, "
+        "không phải nhãn aspect/sentiment tự động."
+    )
+    include_mock = st.checkbox(
+        "Bao gồm review mô phỏng",
+        value=False,
+        help="Mặc định loại review mô phỏng để candidate phản ánh dữ liệu crawl thực tế.",
+    )
+    min_frequency = st.slider(
+        "Số review khác nhau tối thiểu",
+        min_value=1,
+        max_value=20,
+        value=5,
+        help="Tăng ngưỡng để giảm các cụm hiếm hoặc nhiễu.",
+    )
+    try:
+        discovery_view = view
+        if not include_mock and "platform" in view.columns:
+            mock_mask = view["platform"].fillna("").astype(str).str.lower().str.startswith("mock_")
+            discovery_view = view.loc[~mock_mask]
+            if mock_mask.any():
+                st.caption(f"Đã loại {int(mock_mask.sum()):,} review mô phỏng.")
+        candidates = discover_aspect_candidates(
+            discovery_view,
+            aspects,
+            min_frequency=min_frequency,
+        )
+        if ASPECT_CANDIDATES_IGNORED_PATH.exists():
+            ignored_values = json.loads(ASPECT_CANDIDATES_IGNORED_PATH.read_text(encoding="utf-8"))
+            if not isinstance(ignored_values, list):
+                raise ValueError("Danh sách candidate đã bỏ qua phải có định dạng JSON array.")
+            ignored = {normalize_phrase(value) for value in ignored_values}
+        else:
+            ignored = set()
+    except (OSError, ValueError) as error:
+        st.error(f"Không thể tạo danh sách candidate aspect: {error}")
+        return
+
+    if not candidates.empty:
+        candidates = candidates[
+            ~candidates["keyword"].map(normalize_phrase).isin(ignored)
+        ].reset_index(drop=True)
+    if candidates.empty:
+        st.info("Không tìm thấy candidate phù hợp. Hãy mở rộng bộ lọc hoặc giảm tần suất tối thiểu.")
+        return
+
+    st.markdown("#### Candidate đang chờ duyệt")
+    st.dataframe(
+        candidates[["keyword", "review_count"]]
+        .rename(columns={"keyword": "Cụm từ tiềm năng", "review_count": "Số review"})
+        .head(100),
+        width="stretch",
+        hide_index=True,
+    )
+    selected_keyword = searchable_selectbox(
+        "Chọn cụm từ cần xem:",
+        candidates["keyword"].tolist(),
+        key="aspect_candidate",
+    )
+    if selected_keyword is None:
+        return
+    selected = candidates[candidates["keyword"] == selected_keyword].iloc[0]
+
+    st.markdown("#### Review mẫu")
+    for example in selected["examples"]:
+        st.caption(
+            f"{example['platform']} · {example['product_name']} · "
+            f"Review {example['review_id']} · {example['rating']} sao"
+        )
+        st.text(example["text"])
+
+    aspect_options = ["-- Chọn aspect --", *aspects.keys(), "__new_aspect__"]
+    selected_aspect = searchable_selectbox(
+        "Gán cụm từ vào khía cạnh:",
+        aspect_options,
+        key="aspect_target",
+        format_func=lambda value: (
+            "Tạo khía cạnh mới..." if value == "__new_aspect__"
+            else value.replace("_", " ").title() if value != "-- Chọn aspect --"
+            else value
+        ),
+    )
+    if selected_aspect is None:
+        return
+    new_aspect_key = ""
+    if selected_aspect == "__new_aspect__":
+        new_aspect_key = st.text_input(
+            "Mã khía cạnh mới",
+            placeholder="content hoặc book_format",
+            help="Dùng mã tiếng Anh dạng snake_case để giữ thống nhất với các khía cạnh hiện có.",
+        )
+
+    add_col, ignore_col = st.columns(2)
+    with add_col:
+        add_clicked = st.button("Thêm keyword vào từ điển", type="primary")
+    with ignore_col:
+        ignore_clicked = st.button("Bỏ qua candidate này")
+
+    if add_clicked:
+        if selected_aspect == "-- Chọn aspect --":
+            st.error("Hãy chọn khía cạnh trước khi thêm keyword.")
+        else:
+            target_aspect = selected_aspect
+            if selected_aspect == "__new_aspect__":
+                target_aspect = re.sub(r"[^a-z0-9]+", "_", new_aspect_key.lower()).strip("_")
+                if not target_aspect:
+                    st.error("Nhập mã khía cạnh mới, ví dụ `content` hoặc `book_format`.")
+                    return
+
+            try:
+                current_aspects = load_aspects(str(ASPECT_DATA))
+                normalized_keyword = normalize_phrase(selected_keyword)
+                existing_aspect = next(
+                    (
+                        aspect for aspect, keywords in current_aspects.items()
+                        if any(normalize_phrase(keyword) == normalized_keyword for keyword in keywords)
+                    ),
+                    None,
+                )
+                if existing_aspect:
+                    raise ValueError(f"Keyword này đã thuộc khía cạnh `{existing_aspect}`.")
+                current_aspects.setdefault(target_aspect, []).append(selected_keyword)
+                temporary_path = ASPECT_DATA.with_suffix(".json.tmp")
+                temporary_path.write_text(
+                    json.dumps(current_aspects, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                temporary_path.replace(ASPECT_DATA)
+            except (OSError, ValueError, json.JSONDecodeError) as error:
+                st.error(f"Không thể thêm keyword vào từ điển: {error}")
+            else:
+                st.session_state["aspect_discovery_notice"] = (
+                    f"Đã thêm “{selected_keyword}” vào khía cạnh {target_aspect.replace('_', ' ')}."
+                )
+                st.rerun()
+
+    if ignore_clicked:
+        ignored.add(normalize_phrase(selected_keyword))
+        try:
+            ASPECT_CANDIDATES_IGNORED_PATH.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path = ASPECT_CANDIDATES_IGNORED_PATH.with_suffix(".json.tmp")
+            temporary_path.write_text(
+                json.dumps(sorted(ignored), ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temporary_path.replace(ASPECT_CANDIDATES_IGNORED_PATH)
+        except OSError as error:
+            st.error(f"Không thể lưu candidate đã bỏ qua: {error}")
+        else:
+            st.session_state["aspect_discovery_notice"] = f"Đã bỏ qua candidate “{selected_keyword}”."
+            st.rerun()
+
+
 def render_absa_simulator(aspects: dict) -> None:
     render_page_header(
         title="Trình Mô phỏng & Kiểm thử Đánh giá Thời gian thực",
@@ -708,7 +1049,13 @@ def render_absa_simulator(aspects: dict) -> None:
         "Tiếng lóng & Emoji (Teencode)": "sp okela lắm nha mn, ship nhanh cực ưng bụng luôn ❤️",
         "Đánh giá rác / Xin xu": "hình ảnh và video chỉ mang tính chất nhận xu ạ",
     }
-    selected_example = st.selectbox("Chọn kịch bản mẫu hoặc tự nhập:", ["Tự nhập nhận xét", *examples])
+    selected_example = searchable_selectbox(
+        "Chọn kịch bản mẫu hoặc tự nhập:",
+        ["Tự nhập nhận xét", *examples],
+        key="simulator_example",
+    )
+    if selected_example is None:
+        return
     default_text = "" if selected_example == "Tự nhập nhận xét" else examples[selected_example]
     text = st.text_area("Nội dung đánh giá cần kiểm thử:", value=default_text, height=105)
     rating = st.slider("Số sao giả lập:", 1, 5, 4)
@@ -732,49 +1079,25 @@ def render_absa_simulator(aspects: dict) -> None:
             labels = labels.iloc[0]
 
             ai_sentiment = None
-            candidate_model_not_deployed = False
-            if MODEL_PATH.exists() and MODEL_METADATA_PATH.exists():
-                with open(MODEL_METADATA_PATH, "r", encoding="utf-8") as metadata_file:
-                    model_metadata = json.load(metadata_file)
-                if (
-                    model_metadata.get("label_source") == "manual"
-                    and model_metadata.get("training_dataset_fingerprint")
-                    and model_metadata.get("deployment_ready") is True
-                ):
-                    try:
-                        model = joblib.load(MODEL_PATH)
-                        seg_text = processed.get("comment_text_segmented") or processed.get("comment_text_clean") or text
-                        pred = model.predict([seg_text])[0]
-                        vn_map = {"negative": "Tiêu cực", "neutral": "Trung tính", "positive": "Tích cực"}
-                        ai_sentiment = vn_map.get(pred, str(pred))
-                    except Exception as error:
-                        st.error(f"Không thể tải hoặc chạy mô hình đã huấn luyện: {error}")
-                elif model_metadata.get("label_source") == "manual":
-                    candidate_model_not_deployed = True
+            if os.path.exists(MODEL_PATH):
+                try:
+                    model = joblib.load(MODEL_PATH)
+                    seg_text = processed.get("comment_text_segmented") or processed.get("comment_text_clean") or text
+                    pred = model.predict([seg_text])[0]
+                    vn_map = {"negative": "Tiêu cực", "neutral": "Trung tính", "positive": "Tích cực"}
+                    ai_sentiment = vn_map.get(pred, str(pred))
+                except Exception:
+                    ai_sentiment = None
 
         st.markdown("##### Kết quả phân tích")
         cols = st.columns(4)
         with cols[0]:
             render_kpi("Cảm xúc cơ sở", str(labels["sentiment_name"]), icon="⭐", delta=f"Theo {rating} sao", tooltip="Phân loại trực tiếp theo số sao")
         with cols[1]:
-            model_status = "TF-IDF · đã kiểm định" if ai_sentiment else "Ứng viên nghiên cứu" if candidate_model_not_deployed else "Chưa có model đã kiểm định"
-            render_kpi("Dự đoán AI (Máy học)", ai_sentiment if ai_sentiment else "Chưa sẵn sàng", icon="🤖", delta=model_status, tooltip="Chỉ hiển thị dự đoán khi mô hình vượt qua bước kiểm định triển khai")
-            if candidate_model_not_deployed:
-                st.caption("Mô hình đang lưu là ứng viên nghiên cứu; chưa có test độc lập và chưa được bật cho dự đoán website.")
+            render_kpi("Dự đoán AI (Máy học)", ai_sentiment if ai_sentiment else "Chưa huấn luyện", icon="🤖", delta="Mô hình TF-IDF", tooltip="Dự đoán bởi mô hình máy học đã huấn luyện")
         with cols[2]:
-            if processed["is_spam"]:
-                status_txt = "RÁC (SPAM)"
-                status_delta = processed.get("spam_reason", "Đạt chuẩn")
-                status_type = "bad"
-            elif processed["low_information"]:
-                status_txt = "HỢP LỆ / ÍT THÔNG TIN"
-                status_delta = processed.get("low_information_reason", "Ít thông tin")
-                status_type = "neutral"
-            else:
-                status_txt = "HỢP LỆ"
-                status_delta = processed.get("spam_reason", "Đạt chuẩn")
-                status_type = "good"
-            render_kpi("Kiểm định lọc rác", status_txt, icon="🛡️", delta=status_delta, delta_type=status_type)
+            status_txt = "RÁC (SPAM)" if processed["is_spam"] else "HỢP LỆ"
+            render_kpi("Kiểm định lọc rác", status_txt, icon="🛡️", delta=processed.get("spam_reason", "Đạt chuẩn"), delta_type="bad" if processed["is_spam"] else "good")
         with cols[3]:
             matched = sum(int(labels[f"aspect_{name}"]) for name in aspects)
             render_kpi("Khía cạnh tìm thấy", f"{matched} khía cạnh", icon="🏷️", delta="Theo từ điển Lexicon")
@@ -816,7 +1139,13 @@ def render_risk_attention(view: pd.DataFrame, aspects: dict) -> None:
     with col_c1:
         render_kpi("Số đánh giá cần kiểm tra", f"{len(attention):,}", icon="🚨", delta="Cần can thiệp CSKH", delta_type="bad")
     with col_c2:
-        sig_choice = st.selectbox("Lọc theo loại tín hiệu cảnh báo:", ["Tất cả", "Chỉ đánh giá thấp (1–2★)", "Chỉ trường hợp nghịch lý đánh giá"])
+        sig_choice = searchable_selectbox(
+            "Lọc theo loại tín hiệu cảnh báo:",
+            ["Tất cả", "Chỉ đánh giá thấp (1–2★)", "Chỉ trường hợp nghịch lý đánh giá"],
+            key="risk_signal_filter",
+        )
+    if sig_choice is None:
+        return
 
     if sig_choice == "Chỉ đánh giá thấp (1–2★)":
         attention = attention[attention["loai_tin_hieu"] == "Đánh giá thấp (1–2★)"]
@@ -907,13 +1236,21 @@ def render_risk_explorer(view: pd.DataFrame) -> None:
     with col_search:
         search = st.text_input("Tìm kiếm theo từ khóa trong nội dung:", placeholder="Ví dụ: giao hàng chậm, chất lượng kém, đóng gói móp...")
     with col_sort:
-        sort_by = st.selectbox(
+        sort_by = searchable_selectbox(
             "Sắp xếp theo:",
             ["Nhiều lượt thích nhất (Hữu ích)", "Mới nhất", "Rating thấp nhất (1★)", "Rating cao nhất (5★)"],
+            key="risk_review_sort",
         )
+        if sort_by is None:
+            return
 
     status_options = sorted(view["filter_status"].dropna().astype(str).unique()) if "filter_status" in view else []
-    statuses = st.multiselect("Lọc trạng thái dữ liệu:", status_options, default=status_options)
+    statuses = searchable_multiselect(
+        "Lọc trạng thái dữ liệu:",
+        status_options,
+        default=status_options,
+        key="risk_review_statuses",
+    )
     table = view.copy()
     if search:
         table = table[table["comment_text_raw"].astype(str).str.contains(search, case=False, na=False)]
@@ -1191,6 +1528,9 @@ def render_research_lab(view: pd.DataFrame, processed: Optional[pd.DataFrame] = 
             st.success("Không có vấn đề audit cần xem thêm.")
         else:
             st.dataframe(audit_issues, width="stretch", hide_index=True)
+
+
+
 def render_research_labeling(view: pd.DataFrame, aspects: dict) -> None:
     render_page_header(
         title="Công cụ Gán nhãn Dữ liệu Thủ công (Active Labeling)",
@@ -1330,6 +1670,7 @@ def render_research_labeling(view: pd.DataFrame, aspects: dict) -> None:
         )
 
 
+
 def render_research_report(view: pd.DataFrame, aspects: dict) -> None:
     render_page_header(
         title="Báo cáo Khoa học Tổng hợp Đề tài",
@@ -1411,10 +1752,36 @@ def _crawl_worker(
     output_dir: str,
     run_preprocess: bool,
     log_queue: queue.Queue,
+    sql_server: Optional[str] = None,
+    database_name: Optional[str] = None,
 ) -> None:
     """Chạy crawler trong luồng riêng, ghi log vào queue."""
+    sql_store = None
+    crawl_run_id = None
+    crawl_finished = False
+    reviews_collected = 0
+    reviews_upserted = 0
+    crawler = None
     try:
         log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] ▶ Khởi động crawler cho sàn {platform.upper()}…")
+
+        if sql_server and database_name:
+            sql_store = SQLServerStore(
+                server=sql_server,
+                database_name=database_name,
+            )
+            sql_store.ping()
+            crawl_run_id = sql_store.start_crawl_run(
+                platform=platform,
+                product_id=product_id,
+                shop_id=shop_id,
+                product_name=product_name or "",
+                category=category or "",
+                requested_reviews=max_reviews,
+            )
+            log_queue.put(
+                f"[{datetime.now().strftime('%H:%M:%S')}] 🗃️ Đã tạo lịch sử crawl trong SQL Server."
+            )
 
         if platform == "tiki":
             from src.crawler.tiki_crawler import TikiCrawler
@@ -1438,34 +1805,118 @@ def _crawl_worker(
             )
 
         saved = crawler.save_raw_data(output_dir=output_dir)
-        n_saved = len(crawler.reviews)
-        log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Thu thập xong {n_saved} đánh giá.")
+        reviews_collected = len(crawler.reviews)
+        log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Thu thập xong {reviews_collected} đánh giá.")
 
         if saved:
             log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 💾 Đã lưu: {saved.get('csv', 'N/A')}")
+
+        product = crawler.product_info or {
+            "platform": platform,
+            "product_id": product_id,
+            "shop_id": shop_id,
+            "product_name": product_name or f"Sản phẩm {product_id}",
+            "category": category or "Chưa phân loại",
+        }
+        if sql_store and crawl_run_id:
+            sql_store.upsert_product(product)
+            reviews_upserted = sql_store.upsert_reviews(
+                crawler.reviews,
+                crawl_run_id=crawl_run_id,
+            )
+            sql_store.finish_crawl_run(
+                run_id=crawl_run_id,
+                status="completed" if crawler.reviews else "no_reviews",
+                reviews_collected=reviews_collected,
+                reviews_upserted=reviews_upserted,
+                product=product,
+            )
+            crawl_finished = True
+            log_queue.put(
+                f"[{datetime.now().strftime('%H:%M:%S')}] 🗃️ Đã lưu lịch sử crawl và đồng bộ "
+                f"{reviews_upserted} review vào SQL Server."
+            )
 
         if run_preprocess and saved:
             log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] ⚙️ Đang chạy tiền xử lý dữ liệu…")
             try:
                 from scripts.run_preprocess import run_full_preprocessing
-                run_full_preprocessing(raw_dir=output_dir)
+                processed = run_full_preprocessing(
+                    raw_dir=output_dir,
+                    sync_sql_server=False,
+                    show_statistics=False,
+                )
+                if sql_store and not processed.empty:
+                    processed_upserted = sql_store.upsert_reviews(
+                        processed.to_dict("records")
+                    )
+                    log_queue.put(
+                        f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Đã đồng bộ "
+                        f"{processed_upserted} review đã xử lý vào SQL Server."
+                    )
                 log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Tiền xử lý hoàn tất! Dashboard sẽ được cập nhật khi bạn làm mới.")
             except Exception as exc:
                 log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Lỗi tiền xử lý: {exc}")
 
-        log_queue.put("__DONE__")
-
     except Exception as exc:
+        if sql_store and crawl_run_id and not crawl_finished:
+            try:
+                sql_store.finish_crawl_run(
+                    run_id=crawl_run_id,
+                    status="failed",
+                    reviews_collected=reviews_collected,
+                    reviews_upserted=reviews_upserted,
+                    error=str(exc),
+                    product=crawler.product_info if crawler else None,
+                )
+            except Exception as status_error:
+                log_queue.put(
+                    f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Không thể cập nhật lịch sử crawl: {status_error}"
+                )
         log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Lỗi crawler: {exc}")
-        log_queue.put("__DONE__")
+    finally:
+        try:
+            if sql_store:
+                sql_store.close()
+        except Exception as close_error:
+            log_queue.put(
+                f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Lỗi đóng kết nối SQL Server: {close_error}"
+            )
+        finally:
+            log_queue.put("__DONE__")
 
 
-def render_crawler() -> None:
+def render_crawler(
+    sql_server: Optional[str] = None,
+    database_name: Optional[str] = None,
+) -> None:
     """Module Thu thập Dữ liệu – giao diện Crawler trong Dashboard."""
+    sql_server = sql_server or os.getenv("SQLSERVER_SERVER") or "localhost"
+    database_name = (
+        database_name
+        or os.getenv("SQLSERVER_DATABASE")
+        or DEFAULT_DATABASE_NAME
+    )
     render_page_header(
         ":material/cloud_download: Thu thập Dữ liệu",
         "Cào đánh giá từ Tiki / Shopee, lưu raw data và tự động chạy tiền xử lý để cập nhật Dashboard.",
     )
+
+    with st.expander("Hướng dẫn sử dụng Crawler", expanded=False):
+        st.markdown(
+            """
+            1. **Lấy mã sản phẩm từ URL:**
+               - Tiki: URL dạng `...-p185076264.html` → Product ID là `185076264`.
+               - Shopee: URL dạng `...-i.98765432.1234567890` → Shop ID là `98765432`, Item ID là `1234567890`.
+            2. Nhập các mã bắt buộc, chọn số review cần lấy (10–500), rồi nhấn **Bắt đầu Crawl**.
+            3. Theo dõi log tại tab của sàn. File CSV raw được lưu trong `data/raw/`; có thể xem và tải ở tab **Lịch sử & Tiến độ**.
+            4. Bật **Tự động chạy tiền xử lý** để cập nhật dữ liệu processed. Sau đó nhấn **Làm mới bộ nhớ đệm** trong **Cài đặt nâng cao** để dashboard nạp dữ liệu mới.
+            """
+        )
+        st.info(
+            "Crawl thật có thể bị giới hạn bởi sàn hoặc trả về ít review hơn số lượng yêu cầu. "
+            "Hãy kiểm tra log và dữ liệu raw sau mỗi lần chạy."
+        )
 
     tab_tiki, tab_shopee, tab_history = st.tabs([
         ":material/store: Crawl Tiki",
@@ -1513,6 +1964,8 @@ def render_crawler() -> None:
                         output_dir=tiki_output,
                         run_preprocess=tiki_preprocess,
                         log_queue=st.session_state["crawl_tiki_queue"],
+                        sql_server=sql_server,
+                        database_name=database_name,
                     ),
                     daemon=True,
                 )
@@ -1605,6 +2058,8 @@ def render_crawler() -> None:
                         output_dir=sp_output,
                         run_preprocess=sp_preprocess,
                         log_queue=st.session_state["crawl_sp_queue"],
+                        sql_server=sql_server,
+                        database_name=database_name,
                     ),
                     daemon=True,
                 )
@@ -1835,19 +2290,40 @@ def main() -> None:
         label_visibility="collapsed",
     )
 
+    sql_server = os.getenv("SQLSERVER_SERVER") or "localhost"
+    database_name = (
+        os.getenv("SQLSERVER_DATABASE")
+        or DEFAULT_DATABASE_NAME
+    )
+
     # Cài đặt nâng cao gom trong Expander
-    with st.sidebar.expander(":material/settings: Cài đặt nâng cao"):
-        data_path = st.text_input("Đường dẫn tệp dữ liệu:", str(DEFAULT_DATA))
-        file_mtime = get_file_mtime(data_path)
+    advanced_settings = st.sidebar.expander(":material/settings: Cài đặt nâng cao")
+    with advanced_settings:
         if st.button("Làm mới bộ nhớ đệm", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
 
     # Nạp dữ liệu
     try:
-        df = load_data(data_path, file_mtime)
+        df = load_data(
+            str(DEFAULT_DATA),
+            0.0,
+            data_source="SQL Server",
+            sql_server=sql_server,
+            database_name=database_name,
+        )
     except Exception as error:
-        st.sidebar.error(f"Không thể đọc tệp dữ liệu: {error}")
+        st.sidebar.error(f"Không thể nạp dữ liệu từ SQL Server: {error}")
+        st.stop()
+
+    if df.empty:
+        if "Crawler" in nav_page:
+            render_crawler(
+                sql_server=sql_server,
+                database_name=database_name,
+            )
+            return
+        st.info("Database chưa có review. Hãy chạy crawler để bắt đầu thu thập dữ liệu.")
         st.stop()
 
     st.sidebar.markdown("---")
@@ -1855,16 +2331,37 @@ def main() -> None:
 
     # Bộ lọc nền tảng
     platforms = sorted(df["platform"].dropna().astype(str).unique())
-    selected_platforms = st.sidebar.multiselect("Nền tảng sàn:", platforms, default=platforms)
+    selected_platforms = searchable_multiselect(
+        "Nền tảng sàn:",
+        platforms,
+        default=platforms,
+        key="sidebar_platforms",
+        container=st.sidebar,
+    )
 
     # Bộ lọc ngành hàng
     categories = sorted([str(c) for c in df["category"].dropna().unique() if str(c).strip()]) if "category" in df.columns else []
-    selected_categories = st.sidebar.multiselect("Ngành hàng:", categories, default=categories) if categories else []
+    selected_categories = (
+        searchable_multiselect(
+            "Ngành hàng:",
+            categories,
+            default=categories,
+            key="sidebar_categories",
+            container=st.sidebar,
+        )
+        if categories else []
+    )
 
     # Cascade sản phẩm theo ngành hàng
     cat_df = df[df["category"].astype(str).isin(selected_categories)] if (categories and selected_categories) else df
     products = sorted(cat_df["product_name"].dropna().astype(str).unique()) if "product_name" in cat_df.columns else []
-    selected_products = st.sidebar.multiselect("Sản phẩm cụ thể:", products, default=[])
+    selected_products = searchable_multiselect(
+        "Sản phẩm cụ thể:",
+        products,
+        default=[],
+        key="sidebar_products",
+        container=st.sidebar,
+    )
 
     # Khoảng sao và lọc rác
     ratings = st.sidebar.slider("Khoảng số sao:", 1, 5, (1, 5))
@@ -1916,10 +2413,11 @@ def main() -> None:
             render_overview_platform(view, valid)
 
     elif "Khía cạnh" in nav_page:
-        tab1, tab2, tab3 = st.tabs([
+        tab1, tab2, tab3, tab4 = st.tabs([
             ":material/inventory_2: Theo từng Sản phẩm",
             ":material/grid_view: Ma trận Khía cạnh & Sắc thái",
             ":material/terminal: Thử nghiệm Mô phỏng Đánh giá",
+            ":material/quick_reference: Khám phá từ khóa Aspect",
         ])
         with tab1:
             render_absa_product(view, aspects)
@@ -1927,6 +2425,8 @@ def main() -> None:
             render_absa_matrix(view, aspects)
         with tab3:
             render_absa_simulator(aspects)
+        with tab4:
+            render_aspect_discovery(view, aspects)
 
     elif "Cảnh báo" in nav_page:
         tab1, tab2, tab3 = st.tabs([
@@ -1948,14 +2448,17 @@ def main() -> None:
             ":material/description: Báo cáo Khoa học Tổng hợp",
         ])
         with tab1:
-            render_research_lab(view, df)
+            render_research_lab(view)
         with tab2:
             render_research_labeling(view, aspects)
         with tab3:
             render_research_report(view, aspects)
 
     elif "Crawler" in nav_page:
-        render_crawler()
+        render_crawler(
+            sql_server=sql_server,
+            database_name=database_name,
+        )
 
     else:
         tab1, tab2, tab3 = st.tabs([
@@ -1964,7 +2467,7 @@ def main() -> None:
             ":material/description: Báo cáo Khoa học Tổng hợp",
         ])
         with tab1:
-            render_research_lab(view, df)
+            render_research_lab(view)
         with tab2:
             render_research_labeling(view, aspects)
         with tab3:
